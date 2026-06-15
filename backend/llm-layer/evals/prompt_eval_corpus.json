@@ -1,0 +1,79 @@
+[
+  {
+    "id": "product-discovery-plain-language",
+    "prompt_kind": "base",
+    "request": "Show me available internet offers for Lisbon.",
+    "eval_type": "read",
+    "expected_status": "ready",
+    "expected_tool_name": "searchOSLProductOfferings",
+    "required_prompt_fragments": [
+      "The user does not need to know TMF terminology, schemas, or tool names.",
+      "Translate plain-language user requests into the correct product-oriented platform actions behind the scenes."
+    ],
+    "forbidden_response_terms": [
+      "tmf",
+      "tool name"
+    ]
+  },
+  {
+    "id": "product-order-draft",
+    "prompt_kind": "base",
+    "request": "Order Premium Fiber for our branch office.",
+    "eval_type": "write",
+    "expected_status": "needs_confirmation",
+    "expected_tool_name": "createProductOrder",
+    "required_prompt_fragments": [
+      "Never execute a product order immediately after first detection. Product order writes must go through a draft and explicit confirmation flow.",
+      "When gathering missing information, ask only for platform-relevant ordering details"
+    ],
+    "forbidden_response_terms": [
+      "tmf"
+    ]
+  },
+  {
+    "id": "missing-order-details",
+    "prompt_kind": "base",
+    "request": "Order something for me.",
+    "eval_type": "clarify",
+    "expected_status": "needs_confirmation",
+    "expected_tool_name": "createProductOrder",
+    "required_prompt_fragments": [
+      "Never ask for irrelevant retail attributes such as color, clothing size, flavor, or material unless a tool explicitly exposes them as real product characteristics."
+    ],
+    "forbidden_response_terms": [
+      "tmf"
+    ]
+  },
+  {
+    "id": "mcp-unavailable",
+    "prompt_kind": "unavailable",
+    "request": "What products can I order today?",
+    "eval_type": "mcp_unavailable",
+    "expected_status": "error",
+    "expected_error_code": "mcp_unavailable",
+    "expected_tool_name": "mcp_connection",
+    "required_prompt_fragments": [
+      "Live platform data is currently unavailable.",
+      "Do not fabricate live system state, catalog contents, order information, or action outcomes."
+    ],
+    "forbidden_response_terms": [
+      "tmf"
+    ]
+  },
+  {
+    "id": "plain-language-routing-without-jargon",
+    "prompt_kind": "base",
+    "request": "Find mobile plans for a new site in Porto.",
+    "eval_type": "read",
+    "expected_status": "ready",
+    "expected_tool_name": "searchOSLProductOfferings",
+    "required_prompt_fragments": [
+      "Prefer user-friendly language in responses, and only mention TMF terms when they are genuinely useful.",
+      "Speak in product and order language first, not backend protocol jargon."
+    ],
+    "forbidden_response_terms": [
+      "tmf",
+      "protocol"
+    ]
+  }
+]

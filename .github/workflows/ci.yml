@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ci.yml"
+      - "backend/llm-layer/**"
+      - "ui/mcp-test-console/**"
+      - "docs/**"
+      - "README.md"
+      - ".env.example"
+      - "backend/llm-layer/.env.example"
+      - "backend/llm-layer/.env.local.example"
+      - "ui/mcp-test-console/.env.example"
+  pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "backend/llm-layer/**"
+      - "ui/mcp-test-console/**"
+      - "docs/**"
+      - "README.md"
+      - ".env.example"
+      - "backend/llm-layer/.env.example"
+      - "backend/llm-layer/.env.local.example"
+      - "ui/mcp-test-console/.env.example"
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/llm-layer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Poetry
+        run: python -m pip install poetry
+
+      - name: Install backend dependencies
+        run: poetry install
+
+      - name: Run backend tests
+        run: poetry run python -m pytest -q
+
+  backend-package:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/llm-layer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Poetry
+        run: python -m pip install poetry
+
+      - name: Build backend package
+        run: poetry build
+
+      - name: Build backend container image
+        run: docker build -t llm-layer:ci .
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui/mcp-test-console
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/mcp-test-console/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend type check
+        run: npm run typecheck
+
+      - name: Build frontend bundle
+        run: npm run build
+
+      - name: Build frontend container image
+        run: docker build -t llm-layer-mcp-test-console:ci .

@@ -29,6 +29,16 @@ MCP_SERVER_URL=https://mcp.example.com/mcp
 MCP_SERVER_COMMAND=
 MCP_SERVER_ARGS=
 MCP_SERVER_HEADERS={"Accept":"application/json, text/event-stream"}
+MCP_AUTH_MODE=none
+MCP_AUTH_TOKEN=
+MCP_AUTH_TOKEN_URL=
+MCP_AUTH_CLIENT_ID=
+MCP_AUTH_CLIENT_SECRET=
+MCP_AUTH_USERNAME=
+MCP_AUTH_PASSWORD=
+MCP_AUTH_SCOPE=
+MCP_AUTH_AUDIENCE=
+MCP_AUTH_REFRESH_SKEW_SECONDS=30
 MCP_CONNECT_TIMEOUT_SECONDS=5
 MCP_READ_TIMEOUT_SECONDS=20
 MCP_READ_RETRIES=1
@@ -162,6 +172,66 @@ streamable_http
 - must be valid JSON
 - must decode to an object
 
+### `MCP_AUTH_MODE`
+
+- auth strategy used for MCP network transports
+- allowed values:
+  - `none`
+  - `static_bearer`
+  - `oauth_client_credentials`
+  - `oauth_password`
+
+- current default:
+
+```text
+none
+```
+
+### `MCP_AUTH_TOKEN`
+
+- static bearer token used when `MCP_AUTH_MODE=static_bearer`
+- can be provided with or without the `Bearer ` prefix
+
+### `MCP_AUTH_TOKEN_URL`
+
+- OAuth token endpoint used when `MCP_AUTH_MODE` is `oauth_client_credentials` or `oauth_password`
+- must be a valid `http` or `https` URL
+
+### `MCP_AUTH_CLIENT_ID`
+
+- OAuth client identifier used for token acquisition
+- required for OAuth-based MCP auth modes
+
+### `MCP_AUTH_CLIENT_SECRET`
+
+- optional OAuth client secret
+- used when required by the token endpoint
+
+### `MCP_AUTH_USERNAME`
+
+- username used only when `MCP_AUTH_MODE=oauth_password`
+
+### `MCP_AUTH_PASSWORD`
+
+- password used only when `MCP_AUTH_MODE=oauth_password`
+
+### `MCP_AUTH_SCOPE`
+
+- optional OAuth scope sent during token acquisition
+
+### `MCP_AUTH_AUDIENCE`
+
+- optional OAuth audience sent during token acquisition
+
+### `MCP_AUTH_REFRESH_SKEW_SECONDS`
+
+- number of seconds subtracted from token lifetime before the backend refreshes it
+- current default:
+
+```text
+30
+```
+
 ### `MCP_CONNECT_TIMEOUT_SECONDS`
 
 - timeout used while establishing or refreshing the MCP tool connection
@@ -271,6 +341,11 @@ Current checks:
 - `MCP_SERVER_COMMAND` must be empty for network transports
 - `MCP_SERVER_ARGS` must be empty for network transports
 - `MCP_SERVER_HEADERS` are only allowed for network transports
+- `MCP_AUTH_MODE` must be `none` for `stdio`
+- `MCP_AUTH_MODE` must be one of `none`, `static_bearer`, `oauth_client_credentials`, or `oauth_password`
+- `MCP_AUTH_TOKEN` is required for `static_bearer`
+- `MCP_AUTH_TOKEN_URL` and `MCP_AUTH_CLIENT_ID` are required for OAuth-based auth
+- `MCP_AUTH_USERNAME` and `MCP_AUTH_PASSWORD` are required for `oauth_password`
 - MCP reads use bounded retry/backoff behavior
 - MCP writes are never retried automatically
 - MCP availability failures open a short-lived circuit breaker
@@ -302,8 +377,14 @@ LLM_APPLICATION_NAME=llm-layer-mcp-test-console
 
 MCP_SERVER_NAME=openslice
 MCP_TRANSPORT=streamable_http
-MCP_SERVER_URL=http://10.1.0.75:31015/mcp
+MCP_SERVER_URL=https://mcp.example.com/mcp
 MCP_SERVER_HEADERS={"Accept":"application/json, text/event-stream"}
+MCP_AUTH_MODE=oauth_password
+MCP_AUTH_TOKEN_URL=https://identity.example.com/realms/platform/protocol/openid-connect/token
+MCP_AUTH_CLIENT_ID=platform-client
+MCP_AUTH_USERNAME=platform-user
+MCP_AUTH_PASSWORD=platform-password
+MCP_AUTH_REFRESH_SKEW_SECONDS=30
 MCP_CONNECT_TIMEOUT_SECONDS=5
 MCP_READ_TIMEOUT_SECONDS=20
 MCP_READ_RETRIES=1
@@ -311,7 +392,7 @@ MCP_RETRY_BACKOFF_SECONDS=0.5
 MCP_CIRCUIT_BREAKER_SECONDS=20
 
 PRODUCT_READ_TOOL_NAMES=getOSLProductCatalogs,getOSLServiceCatalogs,getOSLProductCategories,getOSLProductOfferingsInCategory,getOSLProductOfferingByProductOfferingId,getOSLProductByProductSpecificationId,searchOSLProductOfferings,getProductOrder
-PRODUCT_WRITE_TOOL_NAMES=createProductOrder
+PRODUCT_WRITE_TOOL_NAMES=createProductOrder,createServiceOrder
 
 CHAT_MAX_TOOL_ROUNDS=6
 ```

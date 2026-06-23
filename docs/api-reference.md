@@ -199,7 +199,7 @@ Example response when reachable:
   "status": "reachable",
   "tool_server_name": "openslice",
   "tool_server_transport": "streamable_http",
-  "configured_target": "http://10.1.0.75:31015/mcp",
+  "configured_target": "https://mcp.example.com/mcp",
   "configured_command": null,
   "configured_args": [],
   "message": "Connected to the configured MCP server.",

@@ -36,6 +36,16 @@ class AppSettings(BaseSettings):
         default_factory=lambda: {"Accept": "application/json, text/event-stream"},
         alias="MCP_SERVER_HEADERS",
     )
+    mcp_auth_mode: str = Field(default="none", alias="MCP_AUTH_MODE")
+    mcp_auth_token: str | None = Field(default=None, alias="MCP_AUTH_TOKEN")
+    mcp_auth_token_url: str | None = Field(default=None, alias="MCP_AUTH_TOKEN_URL")
+    mcp_auth_client_id: str | None = Field(default=None, alias="MCP_AUTH_CLIENT_ID")
+    mcp_auth_client_secret: str | None = Field(default=None, alias="MCP_AUTH_CLIENT_SECRET")
+    mcp_auth_username: str | None = Field(default=None, alias="MCP_AUTH_USERNAME")
+    mcp_auth_password: str | None = Field(default=None, alias="MCP_AUTH_PASSWORD")
+    mcp_auth_scope: str | None = Field(default=None, alias="MCP_AUTH_SCOPE")
+    mcp_auth_audience: str | None = Field(default=None, alias="MCP_AUTH_AUDIENCE")
+    mcp_auth_refresh_skew_seconds: int = Field(default=30, alias="MCP_AUTH_REFRESH_SKEW_SECONDS", ge=0, le=3600)
     mcp_connect_timeout_seconds: float = Field(default=5.0, alias="MCP_CONNECT_TIMEOUT_SECONDS", gt=0, le=60)
     mcp_read_timeout_seconds: float = Field(default=20.0, alias="MCP_READ_TIMEOUT_SECONDS", gt=0, le=120)
     mcp_read_retries: int = Field(default=1, alias="MCP_READ_RETRIES", ge=0, le=3)
@@ -55,7 +65,7 @@ class AppSettings(BaseSettings):
         alias="PRODUCT_READ_TOOL_NAMES",
     )
     product_write_tool_names: Annotated[set[str], NoDecode] = Field(
-        default_factory=lambda: {"createProductOrder"},
+        default_factory=lambda: {"createProductOrder", "createServiceOrder"},
         alias="PRODUCT_WRITE_TOOL_NAMES",
     )
 
@@ -76,13 +86,31 @@ class AppSettings(BaseSettings):
     def _strip_transport(cls, value: object) -> str:
         return str(value).strip() if value is not None else ""
 
-    @field_validator("llm_http_referer", "llm_application_name", "tool_server_command", mode="before")
+    @field_validator(
+        "llm_http_referer",
+        "llm_application_name",
+        "tool_server_command",
+        "mcp_auth_token",
+        "mcp_auth_token_url",
+        "mcp_auth_client_id",
+        "mcp_auth_client_secret",
+        "mcp_auth_username",
+        "mcp_auth_password",
+        "mcp_auth_scope",
+        "mcp_auth_audience",
+        mode="before",
+    )
     @classmethod
     def _strip_optional_text(cls, value: object) -> str | None:
         if value is None:
             return None
         normalized = str(value).strip()
         return normalized or None
+
+    @field_validator("mcp_auth_mode", mode="before")
+    @classmethod
+    def _strip_auth_mode(cls, value: object) -> str:
+        return str(value).strip().lower() if value is not None else "none"
 
     @field_validator("app_cors_origins", mode="before")
     @classmethod
@@ -189,6 +217,15 @@ class AppSettings(BaseSettings):
             "tool_server_target": tool_server_target,
             "tool_server_args": self.tool_server_args_list,
             "tool_server_headers": self._redact_headers(self.tool_server_headers_dict),
+            "mcp_auth_mode": self.mcp_auth_mode,
+            "mcp_auth_token_url": self.mcp_auth_token_url,
+            "mcp_auth_client_id": self.mcp_auth_client_id,
+            "mcp_auth_client_secret": self._redact_secret(self.mcp_auth_client_secret),
+            "mcp_auth_username": self.mcp_auth_username,
+            "mcp_auth_password": self._redact_secret(self.mcp_auth_password),
+            "mcp_auth_scope": self.mcp_auth_scope,
+            "mcp_auth_audience": self.mcp_auth_audience,
+            "mcp_auth_refresh_skew_seconds": self.mcp_auth_refresh_skew_seconds,
             "mcp_connect_timeout_seconds": self.mcp_connect_timeout_seconds,
             "mcp_read_timeout_seconds": self.mcp_read_timeout_seconds,
             "mcp_read_retries": self.mcp_read_retries,
@@ -215,18 +252,26 @@ class AppSettings(BaseSettings):
         if self.tool_server_transport not in {"sse", "stdio", "streamable_http"}:
             raise ValueError("MCP_TRANSPORT must be one of 'sse', 'stdio', or 'streamable_http'.")
 
+        if self.mcp_auth_mode not in {"none", "static_bearer", "oauth_client_credentials", "oauth_password"}:
+            raise ValueError(
+                "MCP_AUTH_MODE must be one of 'none', 'static_bearer', 'oauth_client_credentials', or 'oauth_password'."
+            )
+
         if self.tool_server_transport == "stdio":
             self._require_non_empty("MCP_SERVER_COMMAND", self.tool_server_command)
             if self.tool_server_url.strip():
                 raise ValueError("MCP_SERVER_URL must be empty when MCP_TRANSPORT=stdio.")
             if self.tool_server_headers:
                 raise ValueError("MCP_SERVER_HEADERS are only supported for network transports.")
+            if self.mcp_auth_mode != "none":
+                raise ValueError("MCP_AUTH_MODE must be 'none' when MCP_TRANSPORT=stdio.")
         else:
             self._validate_url("MCP_SERVER_URL", self.tool_server_url)
             if self.tool_server_command:
                 raise ValueError("MCP_SERVER_COMMAND must be empty when MCP_TRANSPORT uses a network endpoint.")
             if self.tool_server_args:
                 raise ValueError("MCP_SERVER_ARGS must be empty when MCP_TRANSPORT uses a network endpoint.")
+            self._validate_mcp_auth()
 
         if not self.product_read_tool_names:
             raise ValueError("PRODUCT_READ_TOOL_NAMES must define at least one tool.")
@@ -251,6 +296,25 @@ class AppSettings(BaseSettings):
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError(f"{name} must be a valid http or https URL.")
+
+    def _validate_mcp_auth(self) -> None:
+        if self.mcp_auth_mode == "none":
+            return
+
+        if self.mcp_auth_mode == "static_bearer":
+            self._require_non_empty("MCP_AUTH_TOKEN", self.mcp_auth_token)
+            return
+
+        self._require_non_empty("MCP_AUTH_TOKEN_URL", self.mcp_auth_token_url)
+        self._require_non_empty("MCP_AUTH_CLIENT_ID", self.mcp_auth_client_id)
+        assert self.mcp_auth_token_url is not None
+        self._validate_url("MCP_AUTH_TOKEN_URL", self.mcp_auth_token_url)
+
+        if self.mcp_auth_mode == "oauth_client_credentials":
+            return
+
+        self._require_non_empty("MCP_AUTH_USERNAME", self.mcp_auth_username)
+        self._require_non_empty("MCP_AUTH_PASSWORD", self.mcp_auth_password)
 
     @staticmethod
     def _redact_secret(value: str | None) -> str | None:

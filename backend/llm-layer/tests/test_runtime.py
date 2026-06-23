@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -114,3 +115,47 @@ def test_classify_timeout_uses_normalized_category() -> None:
     assert failure.code == "mcp_timeout"
     assert failure.trace_status == "timeout"
     assert failure.retryable is True
+
+
+def test_connection_options_include_static_bearer_auth_header() -> None:
+    settings = _settings(mcp_auth_mode="static_bearer", mcp_auth_token="test-token")
+
+    options = runtime._connection_options(settings)
+
+    assert options["headers"]["Authorization"] == "Bearer test-token"
+
+
+def test_oauth_password_token_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"access_token": "cached-token", "token_type": "Bearer", "expires_in": 120}
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):  # noqa: ANN001
+        calls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(runtime, "urlopen", fake_urlopen)
+    settings = _settings(
+        mcp_auth_mode="oauth_password",
+        mcp_auth_token_url="http://127.0.0.1:8080/token",
+        mcp_auth_client_id="copilot",
+        mcp_auth_username="admin",
+        mcp_auth_password="admin",
+    )
+
+    first = runtime._resolve_mcp_authorization_header(settings)
+    second = runtime._resolve_mcp_authorization_header(settings)
+
+    assert first == "Bearer cached-token"
+    assert second == "Bearer cached-token"
+    assert calls == ["http://127.0.0.1:8080/token"]

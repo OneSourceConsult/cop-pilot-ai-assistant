@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -42,9 +45,17 @@ class McpProbeResult:
     failure: McpFailure | None = None
 
 
+@dataclass(frozen=True)
+class McpAuthToken:
+    header_value: str
+    expires_at: float
+    cache_key: str
+
+
 _toolset: Toolset | None = None
 _circuit_open_until: float = 0.0
 _circuit_failure: McpFailure | None = None
+_mcp_auth_token: McpAuthToken | None = None
 
 
 def create_model(settings: AppSettings | None = None) -> ChatOpenAI:
@@ -197,8 +208,9 @@ def classify_mcp_exception(exc: Exception, *, phase: str) -> McpFailure:
 
 
 def reset_runtime_caches() -> None:
-    global _toolset
+    global _toolset, _mcp_auth_token
     _toolset = None
+    _mcp_auth_token = None
     _reset_circuit()
 
 
@@ -213,8 +225,12 @@ def _connection_options(settings: AppSettings) -> dict[str, object]:
         return options
 
     options["url"] = settings.tool_server_url
-    if settings.tool_server_headers:
-        options["headers"] = settings.tool_server_headers_dict
+    headers = settings.tool_server_headers_dict
+    auth_header = _resolve_mcp_authorization_header(settings)
+    if auth_header:
+        headers["Authorization"] = auth_header
+    if headers:
+        options["headers"] = headers
 
     if settings.tool_server_transport == "streamable_http":
         options["timeout"] = timedelta(seconds=settings.mcp_connect_timeout_seconds)
@@ -264,6 +280,94 @@ def _is_malformed_result(result: object) -> bool:
         if isinstance(first, dict) and "text" in first and not isinstance(first["text"], str):
             return True
     return False
+
+
+def _resolve_mcp_authorization_header(settings: AppSettings) -> str | None:
+    if settings.mcp_auth_mode == "none":
+        return None
+    if settings.mcp_auth_mode == "static_bearer":
+        return _normalize_bearer_token(settings.mcp_auth_token or "")
+    return _get_cached_oauth_header(settings)
+
+
+def _normalize_bearer_token(token: str) -> str:
+    normalized = token.strip()
+    if normalized.lower().startswith("bearer "):
+        return normalized
+    return f"Bearer {normalized}"
+
+
+def _get_cached_oauth_header(settings: AppSettings) -> str:
+    global _mcp_auth_token
+
+    cache_key = _oauth_cache_key(settings)
+    if _mcp_auth_token and _mcp_auth_token.cache_key == cache_key and monotonic() < _mcp_auth_token.expires_at:
+        return _mcp_auth_token.header_value
+
+    token = _fetch_oauth_header(settings, cache_key)
+    _mcp_auth_token = token
+    return token.header_value
+
+
+def _oauth_cache_key(settings: AppSettings) -> str:
+    return "|".join(
+        [
+            settings.mcp_auth_mode,
+            settings.mcp_auth_token_url or "",
+            settings.mcp_auth_client_id or "",
+            settings.mcp_auth_username or "",
+            settings.mcp_auth_scope or "",
+            settings.mcp_auth_audience or "",
+        ]
+    )
+
+
+def _fetch_oauth_header(settings: AppSettings, cache_key: str) -> McpAuthToken:
+    form_data = {
+        "client_id": settings.mcp_auth_client_id or "",
+        "grant_type": "password" if settings.mcp_auth_mode == "oauth_password" else "client_credentials",
+    }
+    if settings.mcp_auth_client_secret:
+        form_data["client_secret"] = settings.mcp_auth_client_secret
+    if settings.mcp_auth_scope:
+        form_data["scope"] = settings.mcp_auth_scope
+    if settings.mcp_auth_audience:
+        form_data["audience"] = settings.mcp_auth_audience
+    if settings.mcp_auth_mode == "oauth_password":
+        form_data["username"] = settings.mcp_auth_username or ""
+        form_data["password"] = settings.mcp_auth_password or ""
+
+    request = Request(
+        settings.mcp_auth_token_url or "",
+        data=urlencode(form_data).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urlopen(request, timeout=10) as response:
+        body = json.loads(response.read().decode("utf-8"))
+
+    access_token = str(body.get("access_token", "")).strip()
+    if not access_token:
+        raise ValueError("The MCP auth token endpoint did not return an access_token.")
+
+    token_type = str(body.get("token_type", "Bearer")).strip() or "Bearer"
+    expires_in = _parse_token_lifetime(body.get("expires_in"), fallback_seconds=300)
+    refresh_window = max(expires_in - settings.mcp_auth_refresh_skew_seconds, 1)
+    return McpAuthToken(
+        header_value=f"{token_type} {access_token}",
+        expires_at=monotonic() + refresh_window,
+        cache_key=cache_key,
+    )
+
+
+def _parse_token_lifetime(raw_value: object, *, fallback_seconds: int) -> int:
+    if raw_value is None:
+        return fallback_seconds
+    try:
+        lifetime = int(raw_value)
+    except (TypeError, ValueError):
+        return fallback_seconds
+    return lifetime if lifetime > 0 else fallback_seconds
 
 
 _UNAVAILABLE_HINTS = (

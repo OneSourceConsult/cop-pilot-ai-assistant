@@ -29,6 +29,12 @@ on:
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: test-key
+      OPENAI_MODEL: gpt-4.1-mini
+      OPENAI_BASE_URL: https://api.openai.com/v1
+      MCP_TRANSPORT: streamable_http
+      MCP_SERVER_URL: http://127.0.0.1:8003/mcp
     defaults:
       run:
         working-directory: backend/llm-layer

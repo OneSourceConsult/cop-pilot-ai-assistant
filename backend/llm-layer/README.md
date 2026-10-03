@@ -12,7 +12,8 @@ The backend is responsible for:
 - executing approved read tools through the configured MCP server
 - turning write-tool calls into product-order drafts
 - requiring explicit confirmation before a write tool executes
-- returning traces that explain guardrail and MCP activity
+- optionally returning traces that explain guardrail and MCP activity
+- publishing redacted, best-effort LLM interaction events outside the response path
 
 It does not persist conversations to a database. Conversation and pending-draft state are in memory for this version, so restarting the process clears active threads.
 
@@ -36,8 +37,10 @@ curl http://127.0.0.1:8010/ready
 - `GET /health`: process is alive
 - `GET /ready`: configuration loaded and app booted
 - `GET /v1/runtime/mcp-status`: live MCP reachability and tool-loading probe
+- `GET /v1/runtime/observability/events`: optional bounded event feed for the test console
 - `POST /v1/chat`: submit a new message or continue a thread
-- `POST /v1/chat/{thread_id}/confirm`: confirm or cancel the pending draft
+- `POST /v1/chat/{thread_id}/confirm`: execute the pending draft by sending the reviewed `draft_id`, `fingerprint`, and an `idempotency_key`
+- `POST /v1/chat/{thread_id}/cancel`: cancel the pending draft
 - `POST /v1/chat/{thread_id}/reset`: clear thread state
 
 The response contract is documented in [docs/api-reference.md](../../docs/api-reference.md). Keep status values stable; clients branch on them.
@@ -47,15 +50,17 @@ The response contract is documented in [docs/api-reference.md](../../docs/api-re
 1. `POST /v1/chat` stores or loads the thread.
 2. The model receives the prompt and known conversation messages.
 3. If the model requests a configured read tool, the backend calls MCP and appends the result.
-4. If the model requests a configured write tool, the backend creates a draft instead of executing it.
-5. The client reviews the draft and calls `confirm`.
-6. Confirmation rechecks authorization and idempotency, then executes the write tool once.
+4. Product-offering detail responses are inspected for characteristics marked `required`, `mandatory`, or with `minCardinality > 0`; that context is kept in the thread.
+5. If the model requests `createProductOrder`, the backend fills missing order dates with a one-year period from today, then blocks any incomplete offering-specific parameters.
+6. A complete write request becomes a draft rather than executing immediately.
+7. The client reviews the draft and calls `confirm` with the matching `draft_id`, `fingerprint`, and a client-generated `idempotency_key`, or calls `cancel`.
+8. Confirmation rechecks authorization and idempotency, then executes the write tool once.
 
 Client-visible statuses:
 
 - `ready`: no pending action
 - `needs_confirmation`: draft created and waiting for client action
-- `blocked`: policy, validation, duplicate confirmation, or missing state stopped the workflow
+- `blocked`: policy, validation, duplicate request, or missing state stopped the workflow
 - `executed`: confirmed write completed
 - `error`: runtime failure from the LLM, MCP server, or backend execution path
 
@@ -71,8 +76,11 @@ Write handling includes:
 - classify configured read tools as immediate actions
 - route every other tool through the draft-confirmation flow
 - normalize draft arguments
+- derive required product characteristics from the selected offering's live detail or specification response
+- block a product-order draft until those discovered characteristics are supplied
 - authorize before execution
-- block duplicate execution of the same draft fingerprint
+- replay safe retries when the same confirmed draft is retried with the same idempotency key
+- block conflicting confirmation attempts for stale or mismatched draft data
 
 The implementation is deterministic and intentionally replaceable. The HTTP contract should not change when a future guardrail service replaces it.
 
@@ -96,6 +104,7 @@ Use [docs/configuration.md](../../docs/configuration.md) when changing environme
 - `app/app_factory.py`: FastAPI app wiring and route handlers
 - `app/config.py`: typed settings, parsing, validation, diagnostics
 - `app/runtime.py`: LLM and MCP client setup
+- `app/observability.py`: LLM usage aggregation, event mapping, and non-blocking delivery
 - `app/workflow_service.py`: chat loop, tool execution, confirmation flow
 - `app/guardrails/`: guardrail interface and local implementation
 - `app/response_factory.py`: stable response and error payloads
@@ -113,4 +122,4 @@ poetry build
 docker build -t llm-layer:local .
 ```
 
-The test suite covers read-tool execution, draft creation, confirmation, duplicate blocking, permissive default guardrails, MCP execution failures, prompt metadata, runtime config validation, and thread reset behavior.
+The test suite covers read-tool execution, draft creation, confirmation, idempotent confirmation retries, permissive default guardrails, MCP execution failures, prompt metadata, runtime config validation, and thread reset behavior.

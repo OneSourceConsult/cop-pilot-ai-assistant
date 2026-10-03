@@ -1,4 +1,6 @@
 from app.config import AppSettings
+from app.guardrails.models import ProductOfferingContext
+from app.order_requirements import default_order_dates
 
 PROMPT_FAMILY = "mcp-native-product-order"
 PROMPT_VERSION = "v1"
@@ -18,6 +20,11 @@ Tool-use policy:
 - Do not claim an operation succeeded unless the live result confirms it.
 - Never execute a product order immediately after first detection. Product order writes must go through a draft and explicit confirmation flow.
 - When gathering missing information, ask only for platform-relevant ordering details such as the exact offering, or other tool-grounded characteristics.
+- Before proposing a product order, inspect the selected offering's detail or specification when that capability is available. Ask only for characteristics marked required by that live data.
+- A characteristic marked `configurable: false` or `isConfigurable: false` is platform-managed: never ask the user to provide it, even when it is required.
+- Use the detailed product specification to identify configurable order characteristics rather than inferring them from offering metadata alone.
+- After an offering detail lookup, the selected offering context is the authoritative list of customer-provided characteristics; do not infer further inputs from technical catalog fields.
+- Never request a product-specific value unless the live product data explicitly defines it as required and configurable. Operational order inputs may be requested only when the selected live order action defines them as required.
 - Never ask for irrelevant retail attributes such as color, clothing size, flavor, or material unless a tool explicitly exposes them as real product characteristics.
 """.strip()
 
@@ -41,13 +48,44 @@ Safety policy:
 """.strip()
 
 def build_base_system_prompt(settings: AppSettings) -> str:
+    default_start, default_end = default_order_dates()
     return "\n\n".join(
         [
             settings.chat_system_prompt.strip(),
             TOOL_USE_POLICY,
+            (
+                "Order date defaults:\n"
+                f"- If the user provides no order dates, use {default_start} as startDate and {default_end} as endDate.\n"
+                "- If the user provides a start date but no end date, use the same date one year later.\n"
+                "- Preserve any dates the user provides. Do not ask only for missing order dates.\n"
+                "- Defaulted dates are not open questions; mention them when presenting the draft.\n"
+                "- Optional characteristics do not block a draft.\n"
+                "- Once the offering and required inputs are known, call the order tool so the backend can create the formal approval draft. "
+                "Do not simulate a draft or ask the user to submit it through chat."
+            ),
             ANSWER_STYLE_POLICY,
             SAFETY_POLICY,
         ]
+    )
+
+
+def build_offering_context_prompt(context: ProductOfferingContext | None) -> str:
+    if context is None:
+        return ""
+    required = ", ".join(requirement.label for requirement in context.requirements) or "none"
+    requirement_policy = (
+        "Ask only for missing required characteristics before preparing a product order."
+        if context.requirements
+        else (
+            "No customer-provided product characteristics are required. Do not infer product values. "
+            "The selected live order action may still require operational inputs before submission."
+        )
+    )
+    return (
+        "Selected offering context from live platform data:\n"
+        f"- Offering: {context.offering_name}\n"
+        f"- Required characteristics: {required}\n"
+        f"{requirement_policy}"
     )
 
 

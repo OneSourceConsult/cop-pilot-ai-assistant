@@ -1,524 +1,464 @@
 <template>
-  <section class="mcp-console">
-    <header class="mcp-console__header">
-      <div>
-        <h2>{{ title }}</h2>
-        <p>Thin chat UI for testing product discovery and guarded product-order execution.</p>
+  <section class="console">
+    <header class="header">
+      <h1>{{ title }}</h1>
+      <nav aria-label="Console views">
+        <button :class="{ active: view === 'chat' }" @click="view = 'chat'">Chat</button>
+        <button :class="{ active: view === 'activity' }" @click="openActivity">
+          Activity <span>{{ events.length }}</span>
+        </button>
+        <button :class="{ active: view === 'connections' }" @click="openConnections">Connections</button>
+      </nav>
+    </header>
+
+    <main v-show="view === 'chat'" class="chat">
+      <div class="section-title">
+        <h2>Chat playground</h2>
+        <button v-if="conversationId" class="link" :disabled="loading" @click="resetCurrentConversation">Start over</button>
       </div>
-      <div class="mcp-console__header-actions">
-        <section class="mcp-console__status-card">
-          <div class="mcp-console__trace-head">
-            <strong>MCP status</strong>
-            <div class="mcp-console__trace-meta">
-              <span :class="`mcp-console__trace-status mcp-console__trace-status--${mcpStatus?.status ?? 'unknown'}`">
-                {{ mcpStatusLoading ? 'checking' : mcpStatus?.status ?? 'unknown' }}
-              </span>
-            </div>
+
+      <div class="messages" aria-live="polite">
+        <article v-for="message in messages" :key="message.id" :class="['message', message.role]">
+          <div>
+            <small>{{ message.role === "user" ? "You" : "Assistant" }}</small>
+            <p v-if="message.role === 'user'">{{ message.content }}</p>
+            <div v-else class="markdown" v-html="renderMarkdown(message.content)"></div>
           </div>
-          <p>{{ mcpStatus?.message ?? 'Status not loaded yet.' }}</p>
-          <p v-if="mcpStatus"><strong>Server:</strong> {{ mcpStatus.tool_server_name }} ({{ mcpStatus.tool_server_transport }})</p>
-          <p v-if="mcpStatus"><strong>Target:</strong> {{ mcpStatus.configured_target }}</p>
-          <p v-if="mcpStatus && mcpStatus.configured_command"><strong>Command:</strong> {{ mcpStatus.configured_command }}</p>
-          <pre v-if="mcpStatus && mcpStatus.configured_args.length > 0">{{ JSON.stringify(mcpStatus.configured_args, null, 2) }}</pre>
-          <p v-if="mcpStatus && mcpStatus.tool_count !== null"><strong>Tools:</strong> {{ mcpStatus.tool_count }}</p>
-          <pre v-if="mcpStatus && mcpStatus.error">{{ JSON.stringify(mcpStatus.error.details, null, 2) }}</pre>
-          <div class="mcp-console__actions">
-            <button class="mcp-console__ghost" :disabled="loading || mcpStatusLoading" @click="handleRefreshStatus">
-              Refresh MCP status
-            </button>
-            <button class="mcp-console__ghost" :disabled="loading || !conversationId" @click="handleReset">
-              Reset
-            </button>
+        </article>
+        <article v-if="loading" class="message assistant"><div><small>Assistant</small><p>Working…</p></div></article>
+      </div>
+
+      <section v-if="pendingDraft" class="panel">
+        <div class="section-title">
+          <div><small>Approval required</small><h2>{{ pendingDraft.display_name }}</h2></div>
+          <div class="actions">
+            <button class="primary" :disabled="loading" @click="confirmDraft(true)">Approve</button>
+            <button :disabled="loading" @click="confirmDraft(false)">Cancel</button>
+          </div>
+        </div>
+        <p>{{ pendingDraft.summary }}</p>
+        <details><summary>Order details</summary><pre>{{ JSON.stringify(pendingDraft.normalized_arguments, null, 2) }}</pre></details>
+      </section>
+
+      <section v-if="lastExecution" class="notice success">
+        <strong>Action completed</strong>
+        <p>The approved request was sent successfully.</p>
+        <details><summary>Technical result</summary><pre>{{ lastExecution.result_preview }}</pre></details>
+      </section>
+
+      <section v-if="lastError" class="notice error">
+        <strong>Request failed</strong>
+        <p>{{ lastError.message }}</p>
+        <p v-if="lastErrorDetail" class="error-text">Cause: {{ lastErrorDetail }}</p>
+      </section>
+
+      <details v-if="showTraces && lastToolTraces.length" class="panel traces">
+        <summary>Developer details · {{ lastToolTraces.length }} tool calls</summary>
+        <article v-for="(trace, index) in lastToolTraces" :key="`${trace.tool_name}-${index}`">
+          <strong>{{ trace.tool_name }}</strong> · {{ trace.status }}
+          <pre>{{ JSON.stringify(trace.arguments, null, 2) }}</pre>
+          <pre>{{ trace.result_preview }}</pre>
+        </article>
+      </details>
+
+      <form class="composer" @submit.prevent="sendMessage">
+        <label for="message">Message</label>
+        <div>
+          <textarea id="message" v-model="draft" rows="2" :disabled="loading" placeholder="What would you like to find or order?" @keydown.enter.exact.prevent="sendMessage" />
+          <button class="primary" type="submit" :disabled="loading || !draft.trim()">{{ loading ? "Sending…" : "Send" }}</button>
+        </div>
+      </form>
+    </main>
+
+    <main v-show="view === 'activity'" class="activity">
+      <div class="section-title activity-title">
+        <div>
+          <h2>Activity</h2>
+          <span v-if="lastRefreshAt" class="refresh-note" aria-live="polite">Updated {{ formatRefreshTime(lastRefreshAt) }}</span>
+        </div>
+        <button :disabled="eventsLoading" @click="refreshActivity">{{ eventsLoading ? "Refreshing…" : "Refresh" }}</button>
+      </div>
+
+      <div class="metric-groups" aria-label="Activity summary">
+        <section class="metric-group">
+          <h3>LLM execution</h3>
+          <div class="metric-grid two-columns">
+            <article><span>Successful</span><strong>{{ eventsError ? "—" : stats.llmSuccessful }}</strong></article>
+            <article><span>Failed</span><strong>{{ eventsError ? "—" : stats.llmFailed }}</strong></article>
+          </div>
+        </section>
+        <section class="metric-group">
+          <h3>Observability</h3>
+          <div class="metric-grid two-columns">
+            <article><span>Events forwarded</span><strong>{{ eventsError ? "—" : stats.forwarded }}</strong></article>
+            <article><span>Forwarding failed</span><strong>{{ eventsError ? "—" : stats.forwardingFailed }}</strong></article>
+          </div>
+        </section>
+        <section class="metric-group performance-group">
+          <h3>Performance</h3>
+          <div class="metric-grid three-columns">
+            <article><span>Input tokens</span><strong>{{ eventsError ? "—" : stats.inputTokens.toLocaleString() }}</strong></article>
+            <article><span>Output tokens</span><strong>{{ eventsError ? "—" : stats.outputTokens.toLocaleString() }}</strong></article>
+            <article><span>Avg latency</span><strong>{{ eventsError ? "—" : formatLatency(stats.averageLatency) }}</strong></article>
           </div>
         </section>
       </div>
-    </header>
 
-    <div class="mcp-console__messages">
-      <article
-        v-for="message in messages"
-        :key="message.id"
-        class="mcp-console__message"
-        :class="`mcp-console__message--${message.role}`"
-      >
-        <div class="mcp-console__bubble">
-          <span class="mcp-console__role">{{ message.role === "user" ? "You" : "Assistant" }}</span>
-          <p v-if="message.role === 'user'">{{ message.content }}</p>
-          <div v-else class="mcp-console__markdown" v-html="renderMarkdown(message.content)"></div>
-        </div>
-      </article>
+      <section v-if="viewEnabled && !eventsError" class="activity-controls" aria-label="Activity filters">
+        <label class="search-field">
+          <span>Search</span>
+          <input v-model="searchQuery" type="search" placeholder="Model, provider, tool or ID" />
+        </label>
+        <label>
+          <span>LLM execution</span>
+          <select v-model="executionFilter">
+            <option value="all">All</option>
+            <option value="successful">Successful</option>
+            <option value="failed">Failed</option>
+          </select>
+        </label>
+        <label>
+          <span>Observability</span>
+          <select v-model="forwardingFilter">
+            <option value="all">All</option>
+            <option value="forwarded">Forwarded</option>
+            <option value="failed">Forwarding failed</option>
+            <option value="pending">Pending</option>
+            <option value="local">Local only</option>
+          </select>
+        </label>
+        <label>
+          <span>Approval</span>
+          <select v-model="approvalFilter">
+            <option value="all">All</option>
+            <option value="pending">Pending</option>
+            <option value="not-required">Not required</option>
+          </select>
+        </label>
+        <label>
+          <span>From</span>
+          <input v-model="dateFrom" type="date" />
+        </label>
+        <label>
+          <span>To</span>
+          <input v-model="dateTo" type="date" />
+        </label>
+      </section>
 
-      <article v-if="loading" class="mcp-console__message mcp-console__message--assistant">
-        <div class="mcp-console__bubble">
-          <span class="mcp-console__role">Assistant</span>
-          <p>Working...</p>
-        </div>
-      </article>
-    </div>
-
-    <section v-if="pendingDraft" class="mcp-console__draft">
-      <div class="mcp-console__draft-head">
-        <div>
-          <span class="mcp-console__pill">Pending confirmation</span>
-          <h3>{{ pendingDraft.display_name }}</h3>
-          <p>{{ pendingDraft.summary }}</p>
-        </div>
-        <div class="mcp-console__actions">
-          <button class="mcp-console__send" :disabled="loading || !conversationId" @click="handleConfirm(true)">
-            Confirm order
-          </button>
-          <button class="mcp-console__ghost" :disabled="loading || !conversationId" @click="handleConfirm(false)">
-            Cancel draft
-          </button>
-        </div>
+      <div v-if="viewEnabled && !eventsError && events.length" class="results-bar">
+        <span>Showing {{ filteredEvents.length }} of {{ events.length }}</span>
+        <button v-if="filtersActive" class="link" @click="clearFilters">Clear filters</button>
       </div>
 
-      <pre>{{ JSON.stringify(pendingDraft.normalized_arguments, null, 2) }}</pre>
-    </section>
+      <section v-if="eventsError" class="empty error-state">
+        <strong>Activity could not be loaded</strong>
+        <p>{{ eventsError }}</p>
+        <button :disabled="eventsLoading" @click="refreshActivity">Try again</button>
+      </section>
+      <p v-else-if="!viewEnabled" class="empty">Activity history is disabled in this environment.</p>
+      <p v-else-if="eventsLoading && !events.length" class="empty" aria-live="polite">Loading activity…</p>
+      <p v-else-if="!events.length" class="empty">No LLM activity yet. Send a chat message to create an event.</p>
+      <p v-else-if="!filteredEvents.length" class="empty">No activity matches these filters.</p>
 
-    <section v-if="lastExecution" class="mcp-console__execution">
-      <div class="mcp-console__trace-head">
-        <strong>Latest execution</strong>
-        <span class="mcp-console__trace-status mcp-console__trace-status--executed">
-          {{ lastExecution.status }}
-        </span>
+      <div v-else class="event-list">
+        <details v-for="event in filteredEvents" :key="event.event_id" class="event">
+          <summary>
+            <div class="event-heading">
+              <div class="event-model">
+                <strong>{{ event.payload.model }}</strong>
+                <span>{{ event.payload.provider }}</span>
+              </div>
+              <time>{{ formatTime(event.payload.timestamp) }}</time>
+            </div>
+            <div class="event-statuses" aria-label="Event statuses">
+              <span :class="['status', event.payload.success ? 'sent' : 'failed']">LLM: {{ event.payload.success ? "Successful" : "Failed" }}</span>
+              <span :class="['status', forwardingTone(event)]">Observability: {{ forwardingStatusLabel(event.delivery_status) }}</span>
+              <span :class="['status', event.payload.eventType === 'needs_confirmation' ? 'approval-pending' : 'neutral']">Approval: {{ event.payload.eventType === "needs_confirmation" ? "Pending" : "Not required" }}</span>
+            </div>
+            <div class="event-performance">
+              <span><small>Input</small>{{ event.payload.inputTokens.toLocaleString() }} tokens</span>
+              <span><small>Output</small>{{ event.payload.completionTokens.toLocaleString() }} tokens</span>
+              <span><small>Latency</small>{{ formatLatency(event.payload.latencyMs) }}</span>
+            </div>
+          </summary>
+          <div class="event-expanded">
+            <dl class="event-details">
+              <div>
+                <dt>Conversation ID</dt>
+                <dd class="identifier"><code>{{ event.payload.conversationId }}</code><button class="copy-button" @click="copyIdentifier(event.payload.conversationId, `conversation-${event.event_id}`)">{{ copiedId === `conversation-${event.event_id}` ? "Copied" : "Copy" }}</button></dd>
+              </div>
+              <div>
+                <dt>Event ID</dt>
+                <dd class="identifier"><code>{{ event.event_id }}</code><button class="copy-button" @click="copyIdentifier(event.event_id, `event-${event.event_id}`)">{{ copiedId === `event-${event.event_id}` ? "Copied" : "Copy" }}</button></dd>
+              </div>
+              <div><dt>Recorded</dt><dd>{{ formatTime(event.recorded_at) }}</dd></div>
+              <div><dt>Event type</dt><dd><code>{{ event.payload.eventType }}</code></dd></div>
+              <div v-if="event.payload.mcpToolSelected"><dt>Tool used</dt><dd><code>{{ event.payload.mcpToolSelected }}</code></dd></div>
+              <div><dt>Forwarding</dt><dd>{{ forwardingStatusLabel(event.delivery_status) }}</dd></div>
+              <div><dt>HTTP response</dt><dd>{{ event.status_code ?? "No response" }}</dd></div>
+            </dl>
+            <div v-if="event.payload.reasoningSteps?.length" class="detail-note error-text">
+              <strong>Failure details</strong>
+              <p>{{ event.payload.reasoningSteps.join(" · ") }}</p>
+            </div>
+            <div v-if="event.error" class="detail-note error-text">
+              <strong>Forwarding error</strong>
+              <p>{{ event.error }}</p>
+            </div>
+          </div>
+        </details>
       </div>
-      <p><strong>Tool:</strong> {{ lastExecution.tool_name }}</p>
-      <p><strong>Execution token:</strong> {{ lastExecution.execution_token }}</p>
-      <pre>{{ lastExecution.result_preview }}</pre>
-    </section>
+    </main>
 
-    <section v-if="lastError" class="mcp-console__error">
-      <div class="mcp-console__trace-head">
-        <strong>Latest error</strong>
-        <span class="mcp-console__trace-status mcp-console__trace-status--error">{{ lastError.code }}</span>
-      </div>
-      <p>{{ lastError.message }}</p>
-      <p><strong>Retryable:</strong> {{ lastError.retryable ? "yes" : "no" }}</p>
-      <pre v-if="Object.keys(lastError.details).length > 0">{{ JSON.stringify(lastError.details, null, 2) }}</pre>
-    </section>
-
-    <details v-if="showTraces && lastToolTraces.length > 0" class="mcp-console__traces" open>
-      <summary>Latest tool traces</summary>
-      <div v-for="(trace, index) in lastToolTraces" :key="`${trace.tool_name}-${index}`" class="mcp-console__trace">
-        <div class="mcp-console__trace-head">
-          <strong>{{ trace.tool_name }}</strong>
-          <div class="mcp-console__trace-meta">
-            <span class="mcp-console__trace-stage">{{ trace.stage }}</span>
-            <span :class="`mcp-console__trace-status mcp-console__trace-status--${trace.status}`">
-              {{ trace.status }}
+    <main v-show="view === 'connections'" class="connections">
+      <div class="section-title"><h2>Connections</h2></div>
+      <div class="connection-grid">
+        <section class="panel">
+          <div class="connection-head">
+            <h3>Product service</h3>
+            <span :class="['status', mcpStatus?.status === 'reachable' ? 'sent' : 'failed']">
+              {{ mcpStatusLoading ? "Checking" : mcpStatus?.status === "reachable" ? "Ready" : "Unavailable" }}
             </span>
           </div>
-        </div>
-        <pre>{{ JSON.stringify(trace.arguments, null, 2) }}</pre>
-        <pre>{{ trace.result_preview }}</pre>
-      </div>
-    </details>
+          <p>{{ productServiceMessage }}</p>
+          <details v-if="mcpStatus">
+            <summary>MCP details</summary>
+            <dl>
+              <div><dt>Server</dt><dd>{{ mcpStatus.tool_server_name }}</dd></div>
+              <div><dt>Address</dt><dd>{{ mcpStatus.configured_target }}</dd></div>
+              <div><dt>Transport</dt><dd>{{ mcpStatus.tool_server_transport }}</dd></div>
+            </dl>
+          </details>
+          <button :disabled="mcpStatusLoading" @click="refreshMcpStatus">Check connection</button>
+        </section>
 
-    <form class="mcp-console__composer" @submit.prevent="handleSend">
-      <textarea
-        v-model="draft"
-        class="mcp-console__input"
-        rows="3"
-        :disabled="loading"
-        placeholder="Ask to inspect product offerings or prepare a product order..."
-        @keydown.enter.exact.prevent="handleSend"
-      />
-      <button class="mcp-console__send" :disabled="loading || !draft.trim()" type="submit">Send</button>
-    </form>
+        <section class="panel">
+          <div class="connection-head">
+            <h3>Observability endpoint</h3>
+            <span :class="['status', deliveryStatus.tone]">{{ deliveryStatus.label }}</span>
+          </div>
+          <p>{{ deliveryStatus.message }}</p>
+          <dl>
+            <div><dt>Destination</dt><dd>{{ deliveryTarget ?? "Not configured" }}</dd></div>
+            <div><dt>Latest result</dt><dd>{{ latestEvent ? forwardingStatusLabel(latestEvent.delivery_status) : "No attempt yet" }}</dd></div>
+          </dl>
+          <button :disabled="eventsLoading" @click="refreshEvents">Check connection</button>
+        </section>
+      </div>
+    </main>
   </section>
 </template>
 
 <script setup lang="ts">
 import { marked } from "marked";
-import { onMounted, toRef } from "vue";
+import { computed, onMounted, onUnmounted, ref, toRef } from "vue";
 
+import type { ObservabilityEventRecord } from "./types";
 import { useMcpConversation } from "./useMcpConversation";
 
-const props = withDefaults(
-  defineProps<{
-    apiBaseUrl?: string;
-    title?: string;
-    showTraces?: boolean;
-  }>(),
-  {
-    apiBaseUrl: "http://127.0.0.1:8010",
-    title: "LLM Layer Console",
-    showTraces: true,
-  },
-);
-
-const apiBaseUrl = toRef(props, "apiBaseUrl");
-marked.setOptions({
-  breaks: true,
-  gfm: true,
+const props = withDefaults(defineProps<{
+  apiBaseUrl?: string;
+  getAccessToken?: () => string | null | undefined | Promise<string | null | undefined>;
+  title?: string;
+  showTraces?: boolean;
+}>(), {
+  apiBaseUrl: "http://127.0.0.1:8010",
+  title: "COP-PILOT LLM Chat",
+  showTraces: true,
 });
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+const view = ref<"chat" | "activity" | "connections">("chat");
+const apiBaseUrl = toRef(props, "apiBaseUrl");
+const {
+  conversationId, draft, lastError, lastExecution, lastToolTraces, loading, mcpStatus,
+  mcpStatusLoading, messages, observabilityDeliveryEnabled, observabilityDeliveryTarget,
+  observabilityEvents: events, observabilityEventsError: eventsError,
+  observabilityEventsLoading: eventsLoading, observabilityViewEnabled: viewEnabled,
+  pendingDraft, confirmDraft, refreshMcpStatus, refreshObservabilityEvents: refreshEvents,
+  resetCurrentConversation, sendMessage,
+} = useMcpConversation({
+  getAccessToken: () => props.getAccessToken?.(),
+  get apiBaseUrl() { return apiBaseUrl.value; },
+});
+
+marked.setOptions({ breaks: true, gfm: true });
+
+const searchQuery = ref("");
+const executionFilter = ref<"all" | "successful" | "failed">("all");
+const forwardingFilter = ref<"all" | "forwarded" | "failed" | "pending" | "local">("all");
+const approvalFilter = ref<"all" | "pending" | "not-required">("all");
+const dateFrom = ref("");
+const dateTo = ref("");
+const lastRefreshAt = ref<Date | null>(null);
+const copiedId = ref<string | null>(null);
+
+function escapeHtml(value: string) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-function renderMarkdown(content: string): string {
+function renderMarkdown(content: string) {
   return marked.parse(escapeHtml(content)) as string;
 }
 
-const {
-  conversationId,
-  draft,
-  lastError,
-  lastExecution,
-  lastToolTraces,
-  loading,
-  mcpStatus,
-  mcpStatusLoading,
-  messages,
-  pendingDraft,
-  confirmDraft,
-  refreshMcpStatus,
-  resetCurrentConversation,
-  sendMessage,
-} = useMcpConversation({
-  get apiBaseUrl() {
-    return apiBaseUrl.value;
-  },
+const filteredEvents = computed(() => events.value.filter((event) => {
+  if (executionFilter.value === "successful" && !event.payload.success) return false;
+  if (executionFilter.value === "failed" && event.payload.success) return false;
+
+  if (forwardingFilter.value === "forwarded" && event.delivery_status !== "sent") return false;
+  if (forwardingFilter.value === "failed" && !["failed", "dropped"].includes(event.delivery_status)) return false;
+  if (forwardingFilter.value === "pending" && event.delivery_status !== "queued") return false;
+  if (forwardingFilter.value === "local" && event.delivery_status !== "disabled") return false;
+
+  const approval = event.payload.eventType === "needs_confirmation" ? "pending" : "not-required";
+  if (approvalFilter.value !== "all" && approvalFilter.value !== approval) return false;
+
+  const timestamp = new Date(event.payload.timestamp).getTime();
+  if (dateFrom.value && timestamp < new Date(`${dateFrom.value}T00:00:00`).getTime()) return false;
+  if (dateTo.value && timestamp >= new Date(`${dateTo.value}T00:00:00`).getTime() + 86_400_000) return false;
+
+  const query = searchQuery.value.trim().toLocaleLowerCase();
+  if (!query) return true;
+  const searchable = [
+    event.event_id,
+    event.payload.conversationId,
+    event.payload.model,
+    event.payload.provider,
+    event.payload.eventType,
+    event.payload.mcpToolSelected,
+    event.error,
+    ...(event.payload.reasoningSteps ?? []),
+  ].filter(Boolean).join(" ").toLocaleLowerCase();
+  return searchable.includes(query);
+}));
+
+const stats = computed(() => {
+  const result = filteredEvents.value.reduce((summary, event) => {
+    summary.inputTokens += event.payload.inputTokens;
+    summary.outputTokens += event.payload.completionTokens;
+    summary.totalLatency += event.payload.latencyMs;
+    if (event.payload.success) summary.llmSuccessful += 1;
+    else summary.llmFailed += 1;
+    if (event.delivery_status === "sent") summary.forwarded += 1;
+    if (["failed", "dropped"].includes(event.delivery_status)) summary.forwardingFailed += 1;
+    return summary;
+  }, {
+    llmSuccessful: 0,
+    llmFailed: 0,
+    forwarded: 0,
+    forwardingFailed: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalLatency: 0,
+  });
+  return {
+    ...result,
+    averageLatency: filteredEvents.value.length ? Math.round(result.totalLatency / filteredEvents.value.length) : 0,
+  };
 });
 
-async function handleSend() {
-  await sendMessage();
+const filtersActive = computed(() => Boolean(
+  searchQuery.value
+  || executionFilter.value !== "all"
+  || forwardingFilter.value !== "all"
+  || approvalFilter.value !== "all"
+  || dateFrom.value
+  || dateTo.value,
+));
+
+const lastErrorDetail = computed(() => {
+  const detail = lastError.value?.details.provider_message ?? lastError.value?.details.detail_message;
+  return typeof detail === "string" && detail.trim() ? detail : null;
+});
+
+const latestEvent = computed(() => events.value.find((event) => event.delivery_status !== "disabled"));
+const deliveryTarget = computed(() => eventsError.value ? null : observabilityDeliveryTarget.value);
+const productServiceMessage = computed(() => mcpStatus.value?.status === "reachable"
+  ? `${mcpStatus.value.tool_count ?? 0} tools available.`
+  : "The product service could not be reached.");
+const deliveryStatus = computed(() => {
+  if (eventsError.value) return { tone: "failed", label: "Unavailable", message: "The backend event view could not be reached." };
+  if (!observabilityDeliveryEnabled.value) return { tone: "disabled", label: "Not configured", message: "Observability forwarding is off." };
+  if (events.value.some((event) => ["failed", "dropped"].includes(event.delivery_status))) return { tone: "failed", label: "Needs attention", message: "A recent forwarding attempt failed." };
+  if (latestEvent.value?.delivery_status === "sent") return { tone: "sent", label: "Working", message: "The latest event was acknowledged by the endpoint." };
+  return { tone: "queued", label: "Ready", message: "Send a chat message to test forwarding." };
+});
+
+function forwardingStatusLabel(status: ObservabilityEventRecord["delivery_status"]) {
+  return { sent: "Forwarded", queued: "Pending", failed: "Forwarding failed", dropped: "Not forwarded", disabled: "Local only" }[status];
 }
 
-async function handleConfirm(confirmed: boolean) {
-  await confirmDraft(confirmed);
+function forwardingTone(event: ObservabilityEventRecord) {
+  if (["failed", "dropped"].includes(event.delivery_status)) return "failed";
+  return event.delivery_status;
 }
 
-async function handleReset() {
-  await resetCurrentConversation();
+function formatTime(timestamp: string) {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(timestamp));
 }
 
-async function handleRefreshStatus() {
-  await refreshMcpStatus();
+function formatRefreshTime(timestamp: Date) {
+  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(timestamp);
 }
 
+function formatLatency(latencyMs: number) {
+  return latencyMs >= 1000 ? `${(latencyMs / 1000).toFixed(1)} s` : `${latencyMs} ms`;
+}
+
+function clearFilters() {
+  searchQuery.value = "";
+  executionFilter.value = "all";
+  forwardingFilter.value = "all";
+  approvalFilter.value = "all";
+  dateFrom.value = "";
+  dateTo.value = "";
+}
+
+let copyTimer: number | undefined;
+async function copyIdentifier(value: string, key: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+  } else {
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+  copiedId.value = key;
+  window.clearTimeout(copyTimer);
+  copyTimer = window.setTimeout(() => { copiedId.value = null; }, 1500);
+}
+
+async function refreshActivity() {
+  await refreshEvents();
+  if (!eventsError.value) lastRefreshAt.value = new Date();
+}
+
+function openActivity() {
+  view.value = "activity";
+  void refreshActivity();
+}
+
+function openConnections() {
+  view.value = "connections";
+  void Promise.all([refreshMcpStatus(), refreshEvents()]);
+}
+
+let refreshTimer: number | undefined;
 onMounted(() => {
   void refreshMcpStatus();
+  void refreshActivity();
+  refreshTimer = window.setInterval(() => {
+    if (view.value !== "chat") void refreshActivity();
+  }, 3000);
+});
+onUnmounted(() => {
+  window.clearInterval(refreshTimer);
+  window.clearTimeout(copyTimer);
 });
 </script>
 
-<style scoped>
-.mcp-console {
-  display: grid;
-  grid-template-rows: auto 1fr auto auto auto;
-  gap: 1rem;
-  min-height: 70vh;
-  min-width: 0;
-  padding: 1.25rem;
-  border: 1px solid #d8e2ec;
-  border-radius: 20px;
-  background:
-    radial-gradient(circle at top right, rgba(91, 141, 239, 0.08), transparent 28%),
-    linear-gradient(180deg, #fbfdff 0%, #f3f7fb 100%);
-  color: #16324f;
-}
-
-.mcp-console__header,
-.mcp-console__draft-head,
-.mcp-console__trace-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.mcp-console__header h2,
-.mcp-console__draft h3 {
-  margin: 0;
-}
-
-.mcp-console__header p,
-.mcp-console__draft p {
-  margin: 0.35rem 0 0;
-  color: #59738f;
-  overflow-wrap: anywhere;
-}
-
-.mcp-console__header-actions {
-  display: flex;
-  flex: 1 1 20rem;
-  justify-content: flex-end;
-  min-width: 0;
-}
-
-.mcp-console__status-card {
-  width: min(100%, 24rem);
-  min-width: 0;
-  padding: 1rem;
-  border: 1px solid #d8e2ec;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 10px 30px rgba(22, 50, 79, 0.06);
-}
-
-.mcp-console__status-card p {
-  margin: 0.45rem 0 0;
-  color: #3f5974;
-  overflow-wrap: anywhere;
-}
-
-.mcp-console__messages {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  min-height: 18rem;
-  overflow: auto;
-}
-
-.mcp-console__message {
-  display: flex;
-  min-width: 0;
-}
-
-.mcp-console__message--user {
-  justify-content: flex-end;
-}
-
-.mcp-console__bubble,
-.mcp-console__draft,
-.mcp-console__error,
-.mcp-console__execution,
-.mcp-console__traces {
-  border: 1px solid #d8e2ec;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 10px 30px rgba(22, 50, 79, 0.06);
-}
-
-.mcp-console__bubble {
-  max-width: min(42rem, 90%);
-  min-width: 0;
-  padding: 0.9rem 1rem;
-}
-
-.mcp-console__message--user .mcp-console__bubble {
-  background: #16324f;
-  color: white;
-  border-color: #16324f;
-}
-
-.mcp-console__role {
-  display: inline-block;
-  margin-bottom: 0.35rem;
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  opacity: 0.7;
-}
-
-.mcp-console__bubble p {
-  margin: 0;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.mcp-console__markdown {
-  line-height: 1.6;
-}
-
-.mcp-console__markdown :deep(p),
-.mcp-console__markdown :deep(ul),
-.mcp-console__markdown :deep(ol) {
-  margin: 0;
-}
-
-.mcp-console__markdown :deep(p + p),
-.mcp-console__markdown :deep(p + ul),
-.mcp-console__markdown :deep(p + ol),
-.mcp-console__markdown :deep(ul + p),
-.mcp-console__markdown :deep(ol + p),
-.mcp-console__markdown :deep(ul + ol),
-.mcp-console__markdown :deep(ol + ul) {
-  margin-top: 0.75rem;
-}
-
-.mcp-console__markdown :deep(ul),
-.mcp-console__markdown :deep(ol) {
-  padding-left: 1.35rem;
-}
-
-.mcp-console__markdown :deep(li + li) {
-  margin-top: 0.35rem;
-}
-
-.mcp-console__markdown :deep(strong) {
-  font-weight: 700;
-}
-
-.mcp-console__markdown :deep(code) {
-  padding: 0.12rem 0.35rem;
-  border-radius: 6px;
-  background: rgba(22, 50, 79, 0.08);
-  font-size: 0.92em;
-}
-
-.mcp-console__markdown :deep(pre) {
-  margin-top: 0.75rem;
-}
-
-.mcp-console__draft,
-.mcp-console__error,
-.mcp-console__execution,
-.mcp-console__traces {
-  padding: 1rem;
-}
-
-.mcp-console__pill,
-.mcp-console__trace-stage {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.2rem 0.55rem;
-  border-radius: 999px;
-  background: #e8f0ff;
-  color: #244977;
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.mcp-console__actions,
-.mcp-console__trace-meta {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.mcp-console__traces summary {
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.mcp-console__trace {
-  margin-top: 0.85rem;
-  padding-top: 0.85rem;
-  border-top: 1px solid #e6edf5;
-}
-
-.mcp-console__trace-status {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.2rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.mcp-console__trace-status--allow,
-.mcp-console__trace-status--success,
-.mcp-console__trace-status--executed {
-  background: #e7f8ef;
-  color: #0f6b3d;
-}
-
-.mcp-console__trace-status--clarify,
-.mcp-console__trace-status--blocked,
-.mcp-console__trace-status--duplicate {
-  background: #fff4d8;
-  color: #8b5e00;
-}
-
-.mcp-console__trace-status--deny,
-.mcp-console__trace-status--error,
-.mcp-console__trace-status--unauthorized {
-  background: #ffe6e3;
-  color: #a12b20;
-}
-
-.mcp-console__composer {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.75rem;
-}
-
-.mcp-console__input {
-  resize: vertical;
-  min-height: 4.25rem;
-  padding: 0.9rem 1rem;
-  border-radius: 16px;
-  border: 1px solid #c9d7e5;
-  background: white;
-  color: inherit;
-  font: inherit;
-}
-
-.mcp-console__send,
-.mcp-console__ghost {
-  min-width: 8rem;
-  height: 2.75rem;
-  padding: 0 1rem;
-  border-radius: 999px;
-  border: 1px solid #16324f;
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.mcp-console__send {
-  background: #16324f;
-  color: white;
-}
-
-.mcp-console__ghost {
-  background: transparent;
-  color: #16324f;
-}
-
-.mcp-console__send:disabled,
-.mcp-console__ghost:disabled,
-.mcp-console__input:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-pre {
-  max-width: 100%;
-  margin: 0.75rem 0 0;
-  padding: 0.9rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  border-radius: 14px;
-  background: #0f1d30;
-  color: #eaf1ff;
-  font-size: 0.82rem;
-  line-height: 1.45;
-}
-
-@media (max-width: 768px) {
-  .mcp-console__composer {
-    grid-template-columns: 1fr;
-  }
-
-  .mcp-console__header,
-  .mcp-console__draft-head,
-  .mcp-console__trace-head {
-    flex-direction: column;
-  }
-
-  .mcp-console__actions {
-    width: 100%;
-    flex-direction: column;
-  }
-
-  .mcp-console__send,
-  .mcp-console__ghost {
-    width: 100%;
-  }
-}
-</style>
+<style scoped src="./McpTestConsole.css"></style>

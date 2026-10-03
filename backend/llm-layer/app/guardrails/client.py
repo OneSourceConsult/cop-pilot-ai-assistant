@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from app.guardrails.models import DraftSummary, ExecutionRecord, GuardrailDecision, ToolMode
+from app.guardrails.models import DraftSummary, ExecutionRecord, GuardrailDecision, ProductOfferingContext, ToolMode
 
 
 class GuardrailClient(ABC):
@@ -12,6 +12,15 @@ class GuardrailClient(ABC):
 
     @abstractmethod
     def validate_product_selection(self, tool_name: str, arguments: dict[str, object]) -> GuardrailDecision:
+        raise NotImplementedError
+
+    @abstractmethod
+    def validate_order_parameters(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        offering_context: ProductOfferingContext | None,
+    ) -> GuardrailDecision:
         raise NotImplementedError
 
     @abstractmethod
@@ -32,5 +41,5 @@ class GuardrailClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def register_execution(self, thread_id: str, draft: DraftSummary) -> ExecutionRecord:
+    def register_execution(self, thread_id: str, draft: DraftSummary, idempotency_key: str) -> ExecutionRecord:
         raise NotImplementedError

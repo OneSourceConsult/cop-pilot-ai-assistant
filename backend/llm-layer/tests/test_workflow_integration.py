@@ -9,8 +9,15 @@ from langchain_core.messages import AIMessage
 from app.config import get_settings
 from app.conversation_store import conversation_store
 from app.guardrails.client import GuardrailClient
-from app.guardrails.models import DraftSummary, ExecutionRecord, GuardrailDecision
+from app.guardrails.models import DraftSummary, ExecutionRecord, GuardrailDecision, ProductOfferingContext
+from app.id_utils import uuid7
+from app.order_requirements import default_order_dates
 from app.runtime import Toolset, reset_runtime_caches
+
+
+def _with_default_dates(arguments: dict[str, object]) -> dict[str, object]:
+    start_date, end_date = default_order_dates()
+    return arguments | {"startDate": start_date, "endDate": end_date}
 
 
 class FakeModel:
@@ -66,6 +73,14 @@ class StubGuardrailClient(GuardrailClient):
         self.validate_calls.append((tool_name, dict(arguments)))
         return GuardrailDecision(status=self.selection_status, message=self.selection_message)
 
+    def validate_order_parameters(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        offering_context: ProductOfferingContext | None,
+    ) -> GuardrailDecision:
+        return GuardrailDecision(status="allow", message="Order parameters allowed.")
+
     def build_product_order_draft(self, tool_name: str, arguments: dict[str, object], thread_id: str) -> DraftSummary:
         display_name = str(arguments.get("productName", "Selected product"))
         return DraftSummary(
@@ -94,12 +109,23 @@ class StubGuardrailClient(GuardrailClient):
             )
         return GuardrailDecision(status="allow", message="No duplicate execution was detected.")
 
-    def register_execution(self, thread_id: str, draft: DraftSummary) -> ExecutionRecord:
+    def register_execution(self, thread_id: str, draft: DraftSummary, idempotency_key: str) -> ExecutionRecord:
         return ExecutionRecord(
-            execution_token=f"exec-{thread_id}",
+            execution_token=uuid7(),
+            draft_id=draft.draft_id,
             draft_fingerprint=draft.fingerprint,
+            display_name=draft.display_name,
+            idempotency_key=idempotency_key,
             tool_name=draft.tool_name,
         )
+
+
+def _confirm_payload(draft: dict[str, object]) -> dict[str, str]:
+    return {
+        "draft_id": str(draft["draft_id"]),
+        "fingerprint": str(draft["fingerprint"]),
+        "idempotency_key": "0197b3c4-8e9f-7a01-b234-cdef01234567",
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -168,14 +194,13 @@ def test_read_only_discovery_flow_returns_ready_with_mcp_trace(monkeypatch: pyte
     _patch_guardrail(monkeypatch, StubGuardrailClient())
 
     client = _client(monkeypatch)
-    response = client.post("/v1/chat", json={"message": "List product offerings"})
+    response = client.post("/v1/chat?include_traces=true", json={"message": "List product offerings"})
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ready"
-    assert body["draft"] is None
-    assert body["pending_action"] is None
-    assert body["execution_result"] is None
+    assert body.get("draft") is None
+    assert body.get("execution_result") is None
     assert body["tool_traces"] == [
         {
             "tool_name": "searchOSLProductOfferings",
@@ -186,6 +211,7 @@ def test_read_only_discovery_flow_returns_ready_with_mcp_trace(monkeypatch: pyte
         }
     ]
     assert tool.calls == [{"category": "mobile"}]
+    assert body["thread_id"][14] == "7"
 
 
 def test_order_draft_flow_creates_pending_confirmation_without_execution(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,33 +225,34 @@ def test_order_draft_flow_creates_pending_confirmation_without_execution(monkeyp
     _patch_guardrail(monkeypatch, guardrail)
 
     client = _client(monkeypatch)
-    response = client.post("/v1/chat", json={"message": "Order Premium Fiber"})
+    response = client.post("/v1/chat?include_traces=true", json={"message": "Order Premium Fiber"})
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "needs_confirmation"
     assert body["draft"]["tool_name"] == "createProductOrder"
     assert body["draft"]["display_name"] == "Premium Fiber"
-    assert body["pending_action"] == "confirm_product_order"
-    assert body["execution_result"] is None
+    assert body.get("execution_result") is None
     assert body["tool_traces"] == [
         {
             "tool_name": "createProductOrder",
-            "arguments": {"productName": "Premium Fiber"},
+                "arguments": _with_default_dates({"productName": "Premium Fiber"}),
             "status": "allow",
             "stage": "guardrail",
             "result_preview": "Selection approved for draft.",
         },
         {
             "tool_name": "createProductOrder",
-            "arguments": {"productName": "Premium Fiber"},
+                "arguments": _with_default_dates({"productName": "Premium Fiber"}),
             "status": "allow",
             "stage": "guardrail",
             "result_preview": "Prepare Premium Fiber via createProductOrder.",
         },
     ]
     assert tool.calls == []
-    assert guardrail.validate_calls == [("createProductOrder", {"productName": "Premium Fiber"})]
+    assert guardrail.validate_calls == [
+        ("createProductOrder", _with_default_dates({"productName": "Premium Fiber"}))
+    ]
 
 
 def test_confirmation_executes_pending_draft(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,21 +266,24 @@ def test_confirmation_executes_pending_draft(monkeypatch: pytest.MonkeyPatch) ->
 
     client = _client(monkeypatch)
     initial = client.post("/v1/chat", json={"message": "Order Premium Fiber"}).json()
-    response = client.post(f"/v1/chat/{initial['thread_id']}/confirm", json={"confirmed": True})
+    response = client.post(
+        f"/v1/chat/{initial['thread_id']}/confirm?include_traces=true",
+        json=_confirm_payload(initial["draft"]),
+    )
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "executed"
-    assert body["draft"] is None
-    assert body["pending_action"] is None
+    assert body.get("draft") is None
     assert body["execution_result"] == {
-        "execution_token": f"exec-{initial['thread_id']}",
+        "execution_token": body["execution_result"]["execution_token"],
         "tool_name": "createProductOrder",
         "status": "executed",
         "result_preview": '{"id":"po-1","state":"acknowledged"}',
     }
+    assert body["execution_result"]["execution_token"][14] == "7"
     assert [trace["status"] for trace in body["tool_traces"]] == ["allow", "allow", "success"]
-    assert tool.calls == [{"productName": "Premium Fiber"}]
+    assert tool.calls == [_with_default_dates({"productName": "Premium Fiber"})]
 
 
 def test_rejecting_confirmation_cancels_pending_draft(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,18 +297,13 @@ def test_rejecting_confirmation_cancels_pending_draft(monkeypatch: pytest.Monkey
 
     client = _client(monkeypatch)
     initial = client.post("/v1/chat", json={"message": "Order Premium Fiber"}).json()
-    response = client.post(f"/v1/chat/{initial['thread_id']}/confirm", json={"confirmed": False})
+    response = client.post(f"/v1/chat/{initial['thread_id']}/cancel")
 
     assert response.status_code == 200
     assert response.json() == {
         "thread_id": initial["thread_id"],
         "status": "ready",
         "message": "The product order draft was canceled.",
-        "tool_traces": [],
-        "draft": None,
-        "pending_action": None,
-        "execution_result": None,
-        "error": None,
     }
     assert tool.calls == []
 
@@ -294,15 +319,14 @@ def test_duplicate_confirmation_after_execution_is_blocked(monkeypatch: pytest.M
 
     client = _client(monkeypatch)
     initial = client.post("/v1/chat", json={"message": "Order Premium Fiber"}).json()
-    client.post(f"/v1/chat/{initial['thread_id']}/confirm", json={"confirmed": True})
-    duplicate = client.post(f"/v1/chat/{initial['thread_id']}/confirm", json={"confirmed": True})
+    client.post(f"/v1/chat/{initial['thread_id']}/confirm", json=_confirm_payload(initial["draft"]))
+    duplicate = client.post(f"/v1/chat/{initial['thread_id']}/confirm", json=_confirm_payload(initial["draft"]))
 
     assert duplicate.status_code == 200
     body = duplicate.json()
-    assert body["status"] == "blocked"
-    assert body["error"]["code"] == "missing_pending_draft"
-    assert body["draft"] is None
-    assert body["execution_result"] is None
+    assert body["status"] == "executed"
+    assert body["execution_result"]["tool_name"] == "createProductOrder"
+    assert body.get("draft") is None
 
 
 def test_guardrail_rejection_blocks_draft_creation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -318,18 +342,17 @@ def test_guardrail_rejection_blocks_draft_creation(monkeypatch: pytest.MonkeyPat
     )
 
     client = _client(monkeypatch)
-    response = client.post("/v1/chat", json={"message": "Order Premium Fiber"})
+    response = client.post("/v1/chat?include_traces=true", json={"message": "Order Premium Fiber"})
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "blocked"
     assert body["error"]["code"] == "guardrail_deny"
-    assert body["pending_action"] is None
-    assert body["draft"] is None
+    assert body.get("draft") is None
     assert body["tool_traces"] == [
         {
             "tool_name": "createProductOrder",
-            "arguments": {"productName": "Premium Fiber"},
+                "arguments": _with_default_dates({"productName": "Premium Fiber"}),
             "status": "deny",
             "stage": "guardrail",
             "result_preview": "Order denied by policy.",
@@ -355,19 +378,21 @@ def test_unauthorized_confirmation_keeps_draft_pending(monkeypatch: pytest.Monke
 
     client = _client(monkeypatch)
     initial = client.post("/v1/chat", json={"message": "Order Premium Fiber"}).json()
-    response = client.post(f"/v1/chat/{initial['thread_id']}/confirm", json={"confirmed": True})
+    response = client.post(
+        f"/v1/chat/{initial['thread_id']}/confirm?include_traces=true",
+        json=_confirm_payload(initial["draft"]),
+    )
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "blocked"
     assert body["error"]["code"] == "guardrail_unauthorized"
-    assert body["pending_action"] == "confirm_product_order"
     assert body["draft"]["display_name"] == "Premium Fiber"
-    assert body["execution_result"] is None
+    assert body.get("execution_result") is None
     assert body["tool_traces"] == [
         {
             "tool_name": "createProductOrder",
-            "arguments": {"productName": "Premium Fiber"},
+                "arguments": _with_default_dates({"productName": "Premium Fiber"}),
             "status": "unauthorized",
             "stage": "guardrail",
             "result_preview": "Execution blocked by authorization policy.",
@@ -387,7 +412,10 @@ def test_execution_failure_returns_retryable_error(monkeypatch: pytest.MonkeyPat
 
     client = _client(monkeypatch)
     initial = client.post("/v1/chat", json={"message": "Order Premium Fiber"}).json()
-    response = client.post(f"/v1/chat/{initial['thread_id']}/confirm", json={"confirmed": True})
+    response = client.post(
+        f"/v1/chat/{initial['thread_id']}/confirm?include_traces=true",
+        json=_confirm_payload(initial["draft"]),
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -395,8 +423,7 @@ def test_execution_failure_returns_retryable_error(monkeypatch: pytest.MonkeyPat
     assert body["error"]["code"] == "tool_execution_failed"
     assert body["error"]["retryable"] is False
     assert body["draft"]["display_name"] == "Premium Fiber"
-    assert body["pending_action"] == "confirm_product_order"
-    assert body["execution_result"] is None
+    assert body.get("execution_result") is None
     assert body["tool_traces"][-1]["status"] == "error"
 
 
@@ -412,7 +439,7 @@ def test_reset_during_pending_draft_clears_confirmation_state(monkeypatch: pytes
     client = _client(monkeypatch)
     initial = client.post("/v1/chat", json={"message": "Order Premium Fiber"}).json()
     reset = client.post(f"/v1/chat/{initial['thread_id']}/reset")
-    confirm = client.post(f"/v1/chat/{initial['thread_id']}/confirm", json={"confirmed": True})
+    confirm = client.post(f"/v1/chat/{initial['thread_id']}/confirm", json=_confirm_payload(initial["draft"]))
 
     assert reset.status_code == 200
     assert reset.json() == {"thread_id": initial["thread_id"], "status": "reset"}

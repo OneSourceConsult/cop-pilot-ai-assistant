@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 
 from app.config import AppSettings
 from app.guardrails.client import GuardrailClient
-from app.guardrails.models import DraftSummary, ExecutionRecord, GuardrailDecision, ToolMode
+from app.guardrails.models import DraftSummary, ExecutionRecord, GuardrailDecision, ProductOfferingContext, ToolMode
+from app.order_requirements import missing_requirement_keys
+from app.id_utils import uuid7
 
 
 class MockGuardrailClient(GuardrailClient):
@@ -20,6 +21,24 @@ class MockGuardrailClient(GuardrailClient):
 
     def validate_product_selection(self, tool_name: str, arguments: dict[str, object]) -> GuardrailDecision:
         return GuardrailDecision(status="allow", message="The product-order policy accepted this draft.")
+
+    def validate_order_parameters(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        offering_context: ProductOfferingContext | None,
+    ) -> GuardrailDecision:
+        if tool_name != "createProductOrder" or offering_context is None:
+            return GuardrailDecision(status="allow", message="No offering-specific parameters need validation.")
+
+        missing = missing_requirement_keys(arguments, offering_context.requirements)
+        if missing:
+            labels = ", ".join(requirement.label for requirement in missing)
+            return GuardrailDecision(
+                status="clarify",
+                message=f"The selected offering requires: {labels}. Please provide the missing value(s).",
+            )
+        return GuardrailDecision(status="allow", message="The selected offering's required parameters are complete.")
 
     def build_product_order_draft(self, tool_name: str, arguments: dict[str, object], thread_id: str) -> DraftSummary:
         normalized = self._normalize_arguments(arguments)
@@ -61,10 +80,13 @@ class MockGuardrailClient(GuardrailClient):
             )
         return GuardrailDecision(status="allow", message="No duplicate execution was detected.")
 
-    def register_execution(self, thread_id: str, draft: DraftSummary) -> ExecutionRecord:
+    def register_execution(self, thread_id: str, draft: DraftSummary, idempotency_key: str) -> ExecutionRecord:
         return ExecutionRecord(
-            execution_token=f"exec-{uuid.uuid4()}",
+            execution_token=uuid7(),
+            draft_id=draft.draft_id,
             draft_fingerprint=draft.fingerprint,
+            display_name=draft.display_name,
+            idempotency_key=idempotency_key,
             tool_name=draft.tool_name,
         )
 

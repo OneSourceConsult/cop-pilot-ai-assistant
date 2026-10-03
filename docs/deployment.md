@@ -65,7 +65,9 @@ Example build:
 
 ```bash
 cd ui/mcp-test-console
-docker build -t llm-layer-mcp-test-console:latest .
+docker build \
+  --build-arg VITE_API_BASE_URL=https://api.example.org \
+  -t llm-layer-mcp-test-console:latest .
 ```
 
 Example run:
@@ -74,7 +76,7 @@ Example run:
 docker run --rm -p 8080:8080 llm-layer-mcp-test-console:latest
 ```
 
-If the frontend is hosted separately from the backend, set the public API URL before building the static bundle:
+If the frontend is hosted separately from the backend, pass the public API URL into the Docker build or export it before running `npm run build`:
 
 ```bash
 VITE_API_BASE_URL=https://api.example.org npm run build
@@ -94,6 +96,8 @@ Minimum required production values:
 - `OPENAI_BASE_URL`
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
+- `LLM_PROVIDER`
+- `OPENAI_MAX_TOKENS`
 - `MCP_SERVER_NAME`
 - `MCP_TRANSPORT`
 - `MCP_SERVER_URL` for network transports
@@ -101,11 +105,22 @@ Minimum required production values:
 - `PRODUCT_READ_TOOL_NAMES`
 - `PRODUCT_WRITE_TOOL_NAMES`
 
+Best-effort observability delivery additionally uses:
+
+- `OBSERVABILITY_EVENTS_URL`
+- `OBSERVABILITY_AGENT_ID`
+- `OBSERVABILITY_REQUEST_TIMEOUT_SECONDS`
+- `OBSERVABILITY_QUEUE_SIZE`
+- `OBSERVABILITY_RECENT_EVENT_LIMIT`
+
+Dashboard availability must not be added to liveness or readiness checks. Keep
+`OBSERVABILITY_EVENT_VIEW_ENABLED=false` unless the operator test feed is protected.
+
 Frontend runtime requirements:
 
 - `VITE_API_BASE_URL` is compiled into the static bundle by Vite at build time
 - the built frontend must be able to reach the backend API URL
-- if the UI is hosted separately, routing or proxy rules must allow calls to `/v1/chat`, `/v1/chat/{thread_id}/confirm`, and `/v1/chat/{thread_id}/reset`
+- if the UI is hosted separately, routing or proxy rules must allow calls to `/v1/chat`, `/v1/chat/{thread_id}/confirm`, `/v1/chat/{thread_id}/cancel`, `/v1/chat/{thread_id}/reset`, `/v1/runtime/mcp-status`, and `/v1/runtime/observability/events`
 - frontend local env files are development-only inputs and should not be treated as production deployment configuration
 
 ## Health And Readiness
@@ -133,5 +148,6 @@ This is acceptable for the current v1 path, but deeper dependency readiness shou
 ## Operational Notes
 
 - The backend validates configuration at startup and fails fast on invalid settings.
+- LLM observability events use a bounded background queue and never block chat responses.
 - The frontend is static and should be treated as immutable build output.
 - Production deploys should use CI-built artifacts or the same documented Docker builds, not ad hoc local commands.

@@ -23,9 +23,35 @@ class AppSettings(BaseSettings):
     llm_api_base_url: str = Field(default="", alias="OPENAI_BASE_URL")
     llm_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     llm_model_name: str = Field(default="", alias="OPENAI_MODEL")
+    llm_provider_name: str = Field(default="openai", alias="LLM_PROVIDER")
+    llm_max_tokens: int = Field(default=1024, alias="OPENAI_MAX_TOKENS", ge=1)
     llm_temperature: float = Field(default=0, alias="OPENAI_TEMPERATURE")
+    llm_request_timeout_seconds: float = Field(default=45.0, alias="LLM_REQUEST_TIMEOUT_SECONDS", gt=0, le=300)
     llm_http_referer: str | None = Field(default=None, alias="LLM_HTTP_REFERER")
     llm_application_name: str | None = Field(default=None, alias="LLM_APPLICATION_NAME")
+
+    observability_events_url: str | None = Field(default=None, alias="OBSERVABILITY_EVENTS_URL")
+    observability_agent_id: str = Field(
+        default="cop-pilot-llm-layer",
+        alias="OBSERVABILITY_AGENT_ID",
+    )
+    observability_request_timeout_seconds: float = Field(
+        default=1.0,
+        alias="OBSERVABILITY_REQUEST_TIMEOUT_SECONDS",
+        gt=0,
+        le=10,
+    )
+    observability_queue_size: int = Field(default=100, alias="OBSERVABILITY_QUEUE_SIZE", ge=1, le=10_000)
+    observability_recent_event_limit: int = Field(
+        default=50,
+        alias="OBSERVABILITY_RECENT_EVENT_LIMIT",
+        ge=1,
+        le=500,
+    )
+    observability_event_view_enabled: bool = Field(
+        default=False,
+        alias="OBSERVABILITY_EVENT_VIEW_ENABLED",
+    )
 
     tool_server_name: str = Field(default="openslice", alias="MCP_SERVER_NAME")
     tool_server_transport: str = Field(default="streamable_http", alias="MCP_TRANSPORT")
@@ -76,7 +102,16 @@ class AppSettings(BaseSettings):
         "Treat live platform results as the source of truth and do not invent them."
     )
 
-    @field_validator("app_name", "app_host", "llm_model_name", "tool_server_name", "chat_system_prompt", mode="before")
+    @field_validator(
+        "app_name",
+        "app_host",
+        "llm_model_name",
+        "llm_provider_name",
+        "observability_agent_id",
+        "tool_server_name",
+        "chat_system_prompt",
+        mode="before",
+    )
     @classmethod
     def _strip_required_text(cls, value: object) -> str:
         return str(value).strip() if value is not None else ""
@@ -89,6 +124,7 @@ class AppSettings(BaseSettings):
     @field_validator(
         "llm_http_referer",
         "llm_application_name",
+        "observability_events_url",
         "tool_server_command",
         "mcp_auth_token",
         "mcp_auth_token_url",
@@ -210,8 +246,17 @@ class AppSettings(BaseSettings):
             "llm_api_base_url": self.llm_api_base_url,
             "llm_api_key": self._redact_secret(self.llm_api_key),
             "llm_model_name": self.llm_model_name,
+            "llm_provider_name": self.llm_provider_name,
+            "llm_max_tokens": self.llm_max_tokens,
             "llm_http_referer": self.llm_http_referer,
             "llm_application_name": self.llm_application_name,
+            "observability_events_url": self.observability_events_url,
+            "observability_agent_id": self.observability_agent_id,
+            "observability_delivery_enabled": self.observability_events_url is not None,
+            "observability_request_timeout_seconds": self.observability_request_timeout_seconds,
+            "observability_queue_size": self.observability_queue_size,
+            "observability_recent_event_limit": self.observability_recent_event_limit,
+            "observability_event_view_enabled": self.observability_event_view_enabled,
             "tool_server_name": self.tool_server_name,
             "tool_server_transport": self.tool_server_transport,
             "tool_server_target": tool_server_target,
@@ -242,12 +287,16 @@ class AppSettings(BaseSettings):
         self._require_non_empty("APP_HOST", self.app_host)
         self._require_non_empty("OPENAI_API_KEY", self.llm_api_key)
         self._require_non_empty("OPENAI_MODEL", self.llm_model_name)
+        self._require_non_empty("LLM_PROVIDER", self.llm_provider_name)
+        self._require_non_empty("OBSERVABILITY_AGENT_ID", self.observability_agent_id)
         self._require_non_empty("OPENAI_BASE_URL", self.llm_api_base_url)
         self._require_non_empty("MCP_SERVER_NAME", self.tool_server_name)
         self._require_non_empty("CHAT_SYSTEM_PROMPT", self.chat_system_prompt)
         self._validate_url("OPENAI_BASE_URL", self.llm_api_base_url)
         if self.llm_http_referer:
             self._validate_url("LLM_HTTP_REFERER", self.llm_http_referer)
+        if self.observability_events_url:
+            self._validate_url("OBSERVABILITY_EVENTS_URL", self.observability_events_url)
 
         if self.tool_server_transport not in {"sse", "stdio", "streamable_http"}:
             raise ValueError("MCP_TRANSPORT must be one of 'sse', 'stdio', or 'streamable_http'.")

@@ -14,6 +14,21 @@ class GuardrailDecision(BaseModel):
     message: str
 
 
+class ProductRequirement(BaseModel):
+    """A required characteristic discovered from a product offering or specification."""
+
+    key: str
+    label: str
+
+
+class ProductOfferingContext(BaseModel):
+    """The selected offering and the required characteristics advertised by the platform."""
+
+    offering_id: str | None = None
+    offering_name: str = "Selected product"
+    requirements: list[ProductRequirement] = Field(default_factory=list)
+
+
 class DraftSummary(BaseModel):
     draft_id: str
     tool_name: str
@@ -26,6 +41,9 @@ class DraftSummary(BaseModel):
 
 class ExecutionRecord(BaseModel):
     execution_token: str
+    draft_id: str
     draft_fingerprint: str
+    display_name: str
+    idempotency_key: str
     tool_name: str
     result_preview: str = ""

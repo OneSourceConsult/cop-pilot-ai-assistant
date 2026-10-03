@@ -12,10 +12,10 @@ def build_draft_response(draft: DraftSummary) -> ProductOrderDraft:
     return ProductOrderDraft(**draft.model_dump())
 
 
-def build_execution_response(record: ExecutionRecord, status: str) -> ExecutionResult:
+def build_execution_response(record: ExecutionRecord) -> ExecutionResult:
     return ExecutionResult(
         execution_token=record.execution_token,
         tool_name=record.tool_name,
-        status=status,
+        status="executed",
         result_preview=record.result_preview,
     )

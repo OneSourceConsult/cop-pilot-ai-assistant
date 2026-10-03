@@ -19,9 +19,19 @@ APP_CORS_ORIGINS=*
 OPENAI_BASE_URL=
 OPENAI_API_KEY=
 OPENAI_MODEL=
+LLM_PROVIDER=
+OPENAI_MAX_TOKENS=1024
 OPENAI_TEMPERATURE=0
+LLM_REQUEST_TIMEOUT_SECONDS=45
 LLM_HTTP_REFERER=
 LLM_APPLICATION_NAME=
+
+OBSERVABILITY_EVENTS_URL=
+OBSERVABILITY_AGENT_ID=cop-pilot-llm-layer
+OBSERVABILITY_REQUEST_TIMEOUT_SECONDS=1
+OBSERVABILITY_QUEUE_SIZE=100
+OBSERVABILITY_RECENT_EVENT_LIMIT=50
+OBSERVABILITY_EVENT_VIEW_ENABLED=false
 
 MCP_SERVER_NAME=openslice
 MCP_TRANSPORT=streamable_http
@@ -83,6 +93,19 @@ Local development uses separate files:
 - required
 - no runtime default
 
+### `LLM_PROVIDER`
+
+- provider associated with the configured API token, such as `openrouter` or `openai`
+- included in outbound observability events
+- current runtime default: `openai`
+
+### `OPENAI_MAX_TOKENS`
+
+- maximum completion-token value passed to the OpenAI-compatible client
+- included as `maxTokens` in outbound observability events
+- current default: `1024`
+- must be greater than zero
+
 ### `OPENAI_TEMPERATURE`
 
 - temperature passed to the chat model
@@ -101,6 +124,46 @@ Local development uses separate files:
 
 - optional outbound `X-Title` header for providers that expect it
 - no runtime default; set it explicitly only when your LLM provider requires it
+
+## Observability Settings
+
+### `OBSERVABILITY_EVENTS_URL`
+
+- best-effort agent-event endpoint
+- delivery is disabled when empty or omitted
+- when set, must be a valid `http` or `https` URL
+- dashboard availability never affects chat responses, health, or readiness
+
+### `OBSERVABILITY_AGENT_ID`
+
+- stable component identifier sent as `agentId`
+- current default: `cop-pilot-llm-layer`
+
+### `OBSERVABILITY_REQUEST_TIMEOUT_SECONDS`
+
+- timeout for one background dashboard request
+- current default: `1`
+- requests are not retried
+
+### `OBSERVABILITY_QUEUE_SIZE`
+
+- maximum pending events held in memory
+- current default: `100`
+- new events are dropped when the queue is full
+
+### `OBSERVABILITY_RECENT_EVENT_LIMIT`
+
+- maximum recent events retained for the optional test-console feed
+- current default: `50`
+
+### `OBSERVABILITY_EVENT_VIEW_ENABLED`
+
+- enables the bounded event feed at `GET /v1/runtime/observability/events`
+- current default: `false`
+- may be enabled locally even when outbound delivery is disabled
+- keep disabled in production unless operator access is protected
+
+See [`docs/observability.md`](observability.md) for event mapping, redaction, and delivery semantics.
 
 ## Frontend Setting
 
@@ -304,8 +367,16 @@ none
 
 - these tools do not execute on first request
 - they go through `draft -> confirm -> execute`
+- for `createProductOrder`, required offering characteristics discovered from live detail responses must be present before a draft is created
+- when an order has no dates, the draft defaults to today through the same date one year later; supplied dates are preserved
 
 ## Chat Flow Settings
+
+### `LLM_REQUEST_TIMEOUT_SECONDS`
+
+- maximum time to wait for a single LLM response
+- default: `45` seconds
+- on expiry, the API returns a retryable `llm_request_failed` response instead of keeping the chat request open
 
 ### `CHAT_MAX_TOOL_ROUNDS`
 
@@ -333,6 +404,10 @@ Current checks:
 - `APP_HOST` must be set
 - `OPENAI_API_KEY` must be set
 - `OPENAI_MODEL` must be set
+- `LLM_PROVIDER` must be set
+- `OPENAI_MAX_TOKENS` must be greater than zero
+- `OBSERVABILITY_AGENT_ID` must be set
+- `OBSERVABILITY_EVENTS_URL`, when set, must be a valid `http` or `https` URL
 - `CHAT_SYSTEM_PROMPT` must be set
 - `MCP_SERVER_NAME` must be set
 - `OPENAI_BASE_URL` must be a valid `http` or `https` URL
@@ -371,9 +446,19 @@ APP_CORS_ORIGINS=*
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=YOUR_KEY
 OPENAI_MODEL=gpt-4.1-mini
+LLM_PROVIDER=openai
+OPENAI_MAX_TOKENS=1024
 OPENAI_TEMPERATURE=0
+LLM_REQUEST_TIMEOUT_SECONDS=45
 LLM_HTTP_REFERER=http://127.0.0.1:4173
 LLM_APPLICATION_NAME=llm-layer-mcp-test-console
+
+OBSERVABILITY_EVENTS_URL=
+OBSERVABILITY_AGENT_ID=cop-pilot-llm-layer
+OBSERVABILITY_REQUEST_TIMEOUT_SECONDS=1
+OBSERVABILITY_QUEUE_SIZE=100
+OBSERVABILITY_RECENT_EVENT_LIMIT=50
+OBSERVABILITY_EVENT_VIEW_ENABLED=true
 
 MCP_SERVER_NAME=openslice
 MCP_TRANSPORT=streamable_http

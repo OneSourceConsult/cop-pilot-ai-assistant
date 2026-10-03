@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
@@ -13,6 +14,10 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 
 from app.config import AppSettings, get_settings
+from app.request_auth import incoming_bearer
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,7 @@ def create_model(settings: AppSettings | None = None) -> ChatOpenAI:
         base_url=resolved.llm_api_base_url,
         api_key=resolved.llm_api_key,
         temperature=resolved.llm_temperature,
+        max_tokens=resolved.llm_max_tokens,
         default_headers=resolved.llm_default_headers,
     )
 
@@ -72,14 +78,15 @@ def create_model(settings: AppSettings | None = None) -> ChatOpenAI:
 async def get_toolset(settings: AppSettings | None = None) -> Toolset:
     global _toolset
 
-    if _toolset is not None:
+    resolved = settings or get_settings()
+    cacheable = incoming_bearer.get() is None and not resolved.mcp_auth_mode.startswith("oauth_")
+    if _toolset is not None and cacheable:
         return _toolset
 
-    resolved = settings or get_settings()
     _raise_if_circuit_open()
-    client = MultiServerMCPClient({resolved.tool_server_name: _connection_options(resolved)})
 
     try:
+        client = MultiServerMCPClient({resolved.tool_server_name: _connection_options(resolved)})
         tools = await asyncio.wait_for(client.get_tools(), timeout=resolved.mcp_connect_timeout_seconds)
     except Exception as exc:
         failure = classify_mcp_exception(exc, phase="connect")
@@ -87,8 +94,10 @@ async def get_toolset(settings: AppSettings | None = None) -> Toolset:
         raise McpOperationError(failure) from exc
 
     _reset_circuit()
-    _toolset = Toolset(tools, {tool.name: tool for tool in tools})
-    return _toolset
+    result = Toolset(tools, {tool.name: tool for tool in tools})
+    if cacheable:
+        _toolset = result
+    return result
 
 
 async def probe_mcp_connection(settings: AppSettings | None = None) -> McpProbeResult:
@@ -99,8 +108,8 @@ async def probe_mcp_connection(settings: AppSettings | None = None) -> McpProbeR
     except McpOperationError as exc:
         return McpProbeResult(reachable=False, tool_count=None, tool_names=[], failure=exc.failure)
 
-    client = MultiServerMCPClient({resolved.tool_server_name: _connection_options(resolved)})
     try:
+        client = MultiServerMCPClient({resolved.tool_server_name: _connection_options(resolved)})
         tools = await asyncio.wait_for(client.get_tools(), timeout=resolved.mcp_connect_timeout_seconds)
     except Exception as exc:
         failure = classify_mcp_exception(exc, phase="connect")
@@ -109,7 +118,8 @@ async def probe_mcp_connection(settings: AppSettings | None = None) -> McpProbeR
 
     global _toolset
     _reset_circuit()
-    _toolset = Toolset(tools, {tool.name: tool for tool in tools})
+    if incoming_bearer.get() is None and not resolved.mcp_auth_mode.startswith("oauth_"):
+        _toolset = Toolset(tools, {tool.name: tool for tool in tools})
     return McpProbeResult(
         reachable=True,
         tool_count=len(tools),
@@ -131,8 +141,28 @@ async def invoke_tool(
     for attempt in range(1, attempts + 1):
         _raise_if_circuit_open()
         try:
+            if incoming_bearer.get() is None and resolved.mcp_auth_mode.startswith("oauth_"):
+                # Re-resolve credentials just before invocation, including after LLM latency.
+                # Never replay a write after a transport or authorization failure.
+                current = await get_toolset(resolved)
+                tool = current.by_name[tool.name]
+            logger.info(
+                "mcp_tool_invoke_start tool=%s attempt=%s allow_retry=%s argument_type=%s",
+                tool.name,
+                attempt,
+                allow_retry,
+                type(arguments).__name__,
+            )
             result = await asyncio.wait_for(tool.ainvoke(arguments), timeout=resolved.mcp_read_timeout_seconds)
         except Exception as exc:
+            logger.exception(
+                "mcp_tool_invoke_exception tool=%s attempt=%s phase=%s exception_type=%s exception=%s",
+                tool.name,
+                attempt,
+                "read" if allow_retry else "write",
+                type(exc).__name__,
+                exc,
+            )
             failure = classify_mcp_exception(exc, phase="read" if allow_retry else "write")
             last_failure = failure
             if attempt >= attempts or not allow_retry or not failure.retryable:
@@ -143,6 +173,12 @@ async def invoke_tool(
             continue
 
         if _is_malformed_result(result):
+            logger.error(
+                "mcp_tool_malformed_result tool=%s attempt=%s result_type=%s",
+                tool.name,
+                attempt,
+                type(result).__name__,
+            )
             failure = McpFailure(
                 code="mcp_malformed_response",
                 trace_status="malformed",
@@ -178,6 +214,15 @@ def classify_mcp_exception(exc: Exception, *, phase: str) -> McpFailure:
 
     detail = f"{type(exc).__name__}: {exc}"
     lowered = str(exc).lower()
+
+    if any(hint in lowered for hint in ("access denied", "unauthorized", "forbidden", "401", "403")):
+        return McpFailure(
+            code="mcp_authorization_failed",
+            trace_status="error",
+            user_message="The product platform rejected authentication. Sign in again and retry with your current access token.",
+            retryable=False,
+            detail_message="MCP authentication or authorization was rejected.",
+        )
 
     if any(token in lowered for token in _UNAVAILABLE_HINTS):
         return McpFailure(
@@ -228,6 +273,7 @@ def _connection_options(settings: AppSettings) -> dict[str, object]:
     headers = settings.tool_server_headers_dict
     auth_header = _resolve_mcp_authorization_header(settings)
     if auth_header:
+        headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
         headers["Authorization"] = auth_header
     if headers:
         options["headers"] = headers
@@ -283,6 +329,8 @@ def _is_malformed_result(result: object) -> bool:
 
 
 def _resolve_mcp_authorization_header(settings: AppSettings) -> str | None:
+    if incoming_bearer.get() is not None:
+        return incoming_bearer.get()
     if settings.mcp_auth_mode == "none":
         return None
     if settings.mcp_auth_mode == "static_bearer":

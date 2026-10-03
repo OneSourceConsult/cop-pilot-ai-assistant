@@ -1,12 +1,19 @@
 from app.guardrails.client import GuardrailClient
-from app.guardrails.models import DraftSummary, ExecutionRecord, GuardrailDecision, ToolMode
-from app.guardrails.service import get_guardrail_client
+from app.guardrails.models import (
+    DraftSummary,
+    ExecutionRecord,
+    GuardrailDecision,
+    ProductOfferingContext,
+    ProductRequirement,
+    ToolMode,
+)
 
 __all__ = [
     "DraftSummary",
     "ExecutionRecord",
     "GuardrailClient",
     "GuardrailDecision",
+    "ProductOfferingContext",
+    "ProductRequirement",
     "ToolMode",
-    "get_guardrail_client",
 ]

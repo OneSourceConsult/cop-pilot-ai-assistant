@@ -9,6 +9,7 @@ from app.workflow_service import (
     run_chat,
     text_from_content as _text,
     tool_result_to_text as _tool_text,
+    cancel_chat,
     confirm_chat,
 )
 
@@ -24,6 +25,7 @@ __all__ = [
     "_tool_text",
     "_tools",
     "_trace",
+    "cancel_chat",
     "confirm_chat",
     "reset_runtime_caches",
     "run_chat",

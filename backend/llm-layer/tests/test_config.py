@@ -50,6 +50,24 @@ def test_invalid_llm_base_url_is_rejected() -> None:
         _settings(llm_api_base_url="not-a-url")
 
 
+def test_invalid_observability_url_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="OBSERVABILITY_EVENTS_URL must be a valid http or https URL"):
+        _settings(observability_events_url="not-a-url")
+
+
+def test_llm_provider_and_agent_id_cannot_be_empty() -> None:
+    with pytest.raises(ValidationError, match="LLM_PROVIDER must be set"):
+        _settings(llm_provider_name=" ")
+
+    with pytest.raises(ValidationError, match="OBSERVABILITY_AGENT_ID must be set"):
+        _settings(observability_agent_id=" ")
+
+
+def test_max_tokens_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        _settings(llm_max_tokens=0)
+
+
 def test_invalid_mcp_transport_is_rejected() -> None:
     with pytest.raises(ValidationError, match="MCP_TRANSPORT must be one of 'sse', 'stdio', or 'streamable_http'"):
         _settings(tool_server_transport="socket")
@@ -184,3 +202,5 @@ def test_startup_diagnostics_redact_secrets() -> None:
     assert settings.startup_diagnostics["mcp_auth_client_secret"] == "***redacted***"
     assert settings.startup_diagnostics["mcp_auth_password"] == "***redacted***"
     assert settings.startup_diagnostics["mcp_read_retries"] == 1
+    assert settings.startup_diagnostics["llm_max_tokens"] == 1024
+    assert settings.startup_diagnostics["observability_agent_id"] == "cop-pilot-llm-layer"

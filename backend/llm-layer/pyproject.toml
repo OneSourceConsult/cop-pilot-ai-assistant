@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "llm-layer"
-version = "0.1.0"
+version = "0.2.3"
 description = "Thin MCP-native backend for the llm-layer v1"
 authors = ["Luis Pina"]
 packages = [{ include = "app" }]
@@ -8,6 +8,7 @@ packages = [{ include = "app" }]
 [tool.poetry.dependencies]
 python = "^3.11"
 fastapi = "0.136.1"
+httpx = "^0.28.1"
 langchain-core = "1.4.0"
 langchain-mcp-adapters = "^0.2.2"
 langchain-openai = "^1.0.1"

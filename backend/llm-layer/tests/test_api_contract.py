@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from app.schemas import ChatResponse, ErrorResponse, ProductOrderDraft
+from app.schemas import (
+    BlockedChatResponse,
+    ConfirmChatRequest,
+    ErrorResponse,
+    NeedsConfirmationChatResponse,
+    ProductOrderDraft,
+    ReadyChatResponse,
+)
 
 
 def _configure_env(monkeypatch) -> None:
@@ -30,13 +37,42 @@ def test_openapi_documents_chat_status_enum_and_error_payload(monkeypatch) -> No
     assert response.status_code == 200
 
     data = response.json()
-    chat_response = data["components"]["schemas"]["ChatResponse"]
-    status = chat_response["properties"]["status"]
-    error = chat_response["properties"]["error"]
+    chat_request = data["components"]["schemas"]["ChatRequest"]
+    confirm_request = data["components"]["schemas"]["ConfirmChatRequest"]
+    chat_request_body = data["paths"]["/v1/chat"]["post"]["requestBody"]["content"]["application/json"]
+    confirm_operation = data["paths"]["/v1/chat/{thread_id}/confirm"]["post"]
+    cancel_operation = data["paths"]["/v1/chat/{thread_id}/cancel"]["post"]
 
-    assert status["default"] == "ready"
-    assert status["enum"] == ["ready", "needs_confirmation", "blocked", "executed", "error"]
-    assert error["anyOf"][0]["$ref"].endswith("/ErrorResponse")
+    assert "reset" not in chat_request["properties"]
+    assert chat_request["examples"][0] == {"message": "Show me the products available."}
+    assert chat_request["examples"][1] == {
+        "message": "Create an order for product X.",
+        "thread_id": "0197b3c4-5d6e-7f80-9abc-def012345678",
+    }
+    assert chat_request_body["examples"]["discover_products"]["value"] == {
+        "message": "Show me the products available."
+    }
+    assert chat_request_body["examples"]["create_order_request"]["value"] == {
+        "message": "Create an order for product X.",
+        "thread_id": "0197b3c4-5d6e-7f80-9abc-def012345678",
+    }
+    assert confirm_request["examples"][0] == {
+        "draft_id": "draft-0197b3c4-5d6e-7f80-9abc-def012345678",
+        "fingerprint": "fp-premium-fiber",
+        "idempotency_key": "0197b3c4-8e9f-7a01-b234-cdef01234567",
+    }
+    assert confirm_operation["requestBody"]["content"]["application/json"]["examples"]["confirm_order"]["value"] == {
+        "draft_id": "draft-0197b3c4-5d6e-7f80-9abc-def012345678",
+        "fingerprint": "fp-premium-fiber",
+        "idempotency_key": "0197b3c4-8e9f-7a01-b234-cdef01234567",
+    }
+    assert "requestBody" not in cancel_operation
+    ready_schema = data["components"]["schemas"]["ReadyChatResponse"]
+    blocked_schema = data["components"]["schemas"]["BlockedChatResponse"]
+    reset_schema = data["components"]["schemas"]["ResetResponse"]
+    assert "status" in ready_schema["required"]
+    assert "status" in blocked_schema["required"]
+    assert "status" in reset_schema["required"]
 
 
 def test_ready_endpoint_returns_runtime_metadata(monkeypatch) -> None:
@@ -77,6 +113,7 @@ def test_mcp_status_endpoint_reports_reachable_probe(monkeypatch) -> None:
         "configured_target": "http://127.0.0.1:8003/mcp",
         "configured_command": None,
         "configured_args": [],
+        "checked_at": response.json()["checked_at"],
         "message": "Connected to the configured MCP server.",
         "tool_count": 2,
         "tool_names": ["createProductOrder", "searchOSLProductOfferings"],
@@ -106,11 +143,17 @@ def test_chat_endpoint_returns_documented_confirmation_shape(monkeypatch) -> Non
     from app.app_factory import create_app
     import app.app_factory as app_factory
 
-    async def fake_run_chat(message: str, thread_id: str | None, reset: bool) -> ChatResponse:
+    async def fake_run_chat(
+        message: str,
+        thread_id: str | None,
+        *,
+        include_traces: bool = True,
+        telemetry=None,
+    ):
         assert message == "Order Premium Fiber"
         assert thread_id is None
-        assert reset is False
-        return ChatResponse(
+        assert include_traces is False
+        return NeedsConfirmationChatResponse(
             thread_id="thread-1",
             status="needs_confirmation",
             message="Draft prepared.",
@@ -122,7 +165,6 @@ def test_chat_endpoint_returns_documented_confirmation_shape(monkeypatch) -> Non
                 summary="Premium Fiber order draft",
                 fingerprint="fp-1",
             ),
-            pending_action="confirm_product_order",
         )
 
     monkeypatch.setattr(app_factory, "run_chat", fake_run_chat)
@@ -134,7 +176,6 @@ def test_chat_endpoint_returns_documented_confirmation_shape(monkeypatch) -> Non
         "thread_id": "thread-1",
         "status": "needs_confirmation",
         "message": "Draft prepared.",
-        "tool_traces": [],
         "draft": {
             "draft_id": "draft-1",
             "tool_name": "createProductOrder",
@@ -144,10 +185,61 @@ def test_chat_endpoint_returns_documented_confirmation_shape(monkeypatch) -> Non
             "fingerprint": "fp-1",
             "requires_confirmation": True,
         },
-        "pending_action": "confirm_product_order",
-        "execution_result": None,
-        "error": None,
     }
+
+
+def test_chat_endpoint_records_redacted_llm_observability_event(monkeypatch) -> None:
+    _configure_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENAI_MAX_TOKENS", "2048")
+    monkeypatch.setenv("OBSERVABILITY_AGENT_ID", "cop-pilot-llm-layer")
+    monkeypatch.setenv("OBSERVABILITY_EVENT_VIEW_ENABLED", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    from app.app_factory import create_app
+    import app.app_factory as app_factory
+
+    async def fake_run_chat(
+        message: str,
+        thread_id: str | None,
+        *,
+        include_traces: bool = True,
+        telemetry=None,
+    ):
+        assert telemetry is not None
+        telemetry.record_attempt()
+        telemetry.input_tokens = 20
+        telemetry.completion_tokens = 8
+        return ReadyChatResponse(
+            thread_id="thread-observability",
+            status="ready",
+            message="Products found.",
+        )
+
+    monkeypatch.setattr(app_factory, "run_chat", fake_run_chat)
+    client = TestClient(create_app())
+
+    chat_response = client.post("/v1/chat", json={"message": "Show products"})
+    events_response = client.get("/v1/runtime/observability/events")
+
+    assert chat_response.status_code == 200
+    assert events_response.status_code == 200
+    body = events_response.json()
+    assert body["delivery_enabled"] is False
+    assert "delivery_target" not in body
+    assert body["view_enabled"] is True
+    assert len(body["events"]) == 1
+    payload = body["events"][0]["payload"]
+    assert payload["agentId"] == "cop-pilot-llm-layer"
+    assert payload["eventType"] == "completion"
+    assert payload["provider"] == "openrouter"
+    assert payload["inputTokens"] == 20
+    assert payload["completionTokens"] == 8
+    assert payload["maxTokens"] == 2048
+    assert payload["inputPrompt"] == "[redacted]"
+    assert payload["responseText"] == "[redacted]"
 
 
 def test_confirm_endpoint_returns_documented_blocked_error_shape(monkeypatch) -> None:
@@ -155,10 +247,15 @@ def test_confirm_endpoint_returns_documented_blocked_error_shape(monkeypatch) ->
     from app.app_factory import create_app
     import app.app_factory as app_factory
 
-    async def fake_confirm_chat(thread_id: str, confirmed: bool) -> ChatResponse:
+    async def fake_confirm_chat(thread_id: str, payload: ConfirmChatRequest, *, include_traces: bool = True):
         assert thread_id == "thread-1"
-        assert confirmed is True
-        return ChatResponse(
+        assert payload == ConfirmChatRequest(
+            draft_id="draft-1",
+            fingerprint="fp-1",
+            idempotency_key="0197b3c4-8e9f-7a01-b234-cdef01234567",
+        )
+        assert include_traces is False
+        return BlockedChatResponse(
             thread_id="thread-1",
             status="blocked",
             message="There is no pending product order draft to confirm.",
@@ -172,22 +269,52 @@ def test_confirm_endpoint_returns_documented_blocked_error_shape(monkeypatch) ->
     monkeypatch.setattr(app_factory, "confirm_chat", fake_confirm_chat)
     client = TestClient(create_app())
 
-    response = client.post("/v1/chat/thread-1/confirm", json={"confirmed": True})
+    response = client.post(
+        "/v1/chat/thread-1/confirm",
+        json={
+            "draft_id": "draft-1",
+            "fingerprint": "fp-1",
+            "idempotency_key": "0197b3c4-8e9f-7a01-b234-cdef01234567",
+        },
+    )
     assert response.status_code == 200
     assert response.json() == {
         "thread_id": "thread-1",
         "status": "blocked",
         "message": "There is no pending product order draft to confirm.",
-        "tool_traces": [],
-        "draft": None,
-        "pending_action": None,
-        "execution_result": None,
         "error": {
             "code": "missing_pending_draft",
             "message": "There is no pending product order draft to confirm.",
             "retryable": False,
             "details": {},
         },
+    }
+
+
+def test_cancel_endpoint_returns_documented_ready_shape(monkeypatch) -> None:
+    _configure_env(monkeypatch)
+    from app.app_factory import create_app
+    import app.app_factory as app_factory
+    from app.schemas import ReadyChatResponse
+
+    async def fake_cancel_chat(thread_id: str, *, include_traces: bool = True):
+        assert thread_id == "thread-1"
+        assert include_traces is False
+        return ReadyChatResponse(
+            thread_id="thread-1",
+            status="ready",
+            message="The product order draft was canceled.",
+        )
+
+    monkeypatch.setattr(app_factory, "cancel_chat", fake_cancel_chat)
+    client = TestClient(create_app())
+
+    response = client.post("/v1/chat/thread-1/cancel")
+    assert response.status_code == 200
+    assert response.json() == {
+        "thread_id": "thread-1",
+        "status": "ready",
+        "message": "The product order draft was canceled.",
     }
 
 
@@ -224,6 +351,7 @@ def test_mcp_status_endpoint_reports_probe_failure(monkeypatch) -> None:
         "configured_target": "http://127.0.0.1:8003/mcp",
         "configured_command": None,
         "configured_args": [],
+        "checked_at": response.json()["checked_at"],
         "message": "The product platform is temporarily unavailable.",
         "tool_count": None,
         "tool_names": [],

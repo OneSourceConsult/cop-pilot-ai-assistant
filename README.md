@@ -19,6 +19,7 @@ FastAPI workflow]
     API --> LLM[OpenAI-compatible LLM]
     API --> MCP[Configured MCP server
 OpenSlice / TMF tools]
+    API -. best-effort redacted events .-> OBS[LLM observability dashboard]
     MCP --> API
     LLM --> API
     API --> UI
@@ -32,22 +33,32 @@ for write tools]
 
 The API accepts chat messages and lets the model call configured MCP tools. Product discovery tools run immediately. Product-order tools are intercepted, normalized into a draft, and executed only after the client confirms the draft.
 
+When no order dates are provided, the draft uses today as the start date and the same date one year later as the end date. Both dates remain visible for review before confirmation.
+
 The write path is intentionally conservative:
 
 - product-order writes return `needs_confirmation`
-- duplicate confirmations are blocked
+- when live offering detail exposes mandatory characteristics, incomplete orders are blocked and the assistant asks only for those missing values
+- clients must echo the reviewed draft and send an idempotency key on confirm
+- same-key confirmation retries replay the same executed result safely
 - write-tool execution is never retried automatically
 
 The local guardrail implementation sits behind an interface so it can be replaced later without changing the HTTP contract.
+
+LLM-backed chat requests also create one redacted observability event. Token usage is aggregated across
+tool-selection rounds and forwarded through a bounded background queue, so dashboard failures never
+change or delay the chat response. The test console can optionally display recent events with separate
+LLM execution, approval, and observability forwarding states. See [`docs/observability.md`](docs/observability.md).
 
 ## Request Flow
 
 1. `POST /v1/chat` receives a user message.
 2. The model may answer directly or request MCP tool calls.
 3. Read tools run against the configured MCP server.
-4. Write tools become a draft and return `needs_confirmation`.
-5. The UI or client calls `POST /v1/chat/{thread_id}/confirm`.
-6. The backend rechecks authorization/idempotency and executes the write tool once.
+4. When an offering-detail response contains required characteristics, the backend stores them in the conversation and the assistant asks only for missing values.
+5. A complete write request becomes a draft and returns `needs_confirmation`.
+6. The UI or client calls `POST /v1/chat/{thread_id}/confirm` with `draft_id`, `fingerprint`, and `idempotency_key`, or calls `POST /v1/chat/{thread_id}/cancel` to discard the draft.
+7. The backend rechecks authorization/idempotency and executes the write tool once when confirmed.
 
 ## Run Locally
 

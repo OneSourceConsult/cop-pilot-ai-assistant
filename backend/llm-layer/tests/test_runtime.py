@@ -57,6 +57,20 @@ def reset_runtime_state() -> None:
     reset_runtime_caches()
 
 
+def test_create_model_configures_max_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(runtime, "ChatOpenAI", FakeChatOpenAI)
+
+    runtime.create_model(_settings(llm_max_tokens=1536))
+
+    assert captured["max_tokens"] == 1536
+
+
 @pytest.mark.asyncio
 async def test_invoke_tool_retries_safe_read_once() -> None:
     tool = FakeTool([TimeoutError("too slow"), [{"text": '{"ok":true}'}]])

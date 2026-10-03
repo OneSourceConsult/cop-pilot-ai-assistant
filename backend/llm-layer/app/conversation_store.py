@@ -4,7 +4,7 @@ from threading import Lock
 
 from langchain_core.messages import BaseMessage
 
-from app.guardrails.models import DraftSummary, ExecutionRecord
+from app.guardrails.models import DraftSummary, ExecutionRecord, ProductOfferingContext
 
 
 @dataclass
@@ -12,6 +12,7 @@ class ConversationState:
     messages: list[BaseMessage] = field(default_factory=list)
     pending_draft: DraftSummary | None = None
     last_execution: ExecutionRecord | None = None
+    offering_context: ProductOfferingContext | None = None
 
 
 class ConversationStore:
@@ -39,6 +40,7 @@ class ConversationStore:
                 messages=list(state.messages),
                 pending_draft=state.pending_draft.model_copy() if state.pending_draft else None,
                 last_execution=state.last_execution.model_copy() if state.last_execution else None,
+                offering_context=state.offering_context.model_copy() if state.offering_context else None,
             )
 
     def save_state(self, conversation_id: str, state: ConversationState) -> None:
@@ -47,6 +49,7 @@ class ConversationStore:
                 messages=list(state.messages),
                 pending_draft=state.pending_draft.model_copy() if state.pending_draft else None,
                 last_execution=state.last_execution.model_copy() if state.last_execution else None,
+                offering_context=state.offering_context.model_copy() if state.offering_context else None,
             )
 
     def reset(self, conversation_id: str) -> None:
